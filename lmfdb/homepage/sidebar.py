@@ -16,7 +16,7 @@ def linked_name(item, level=""):
 
     else:
         if 'dropdown' in item and item['dropdown']:
-            this_entry = ''.join(['<span class="sidebar-dropdown-toggle">',item['title'],' <span class="dropdown-arrow">&gt;</span></span>'])
+            this_entry = ''.join(['<span class="sidebar-dropdown-toggle" onclick="toggle_sidebar_dropdown(event)">',item['title'],' <span class="dropdown-arrow">&gt;</span></span>'])
         elif 'url_for' in item and not ('status' in item and item['status'] == 'future'):
             url = url_for(item['url_for'],**item.get('url_args',{}))
             this_entry = ''.join(['<a href="',url,'">',item['title'],'</a>'])

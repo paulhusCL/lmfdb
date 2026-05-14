@@ -63,27 +63,43 @@ function properties_collapser(evt) {
 }
 
 
+/* Sidebar dropdown toggle function */
+function toggle_sidebar_dropdown(event) {
+  if (event) event.preventDefault();
+
+  /* Find the toggle span that was clicked */
+  var toggle = event && event.currentTarget ? event.currentTarget : event.target;
+  while (toggle && !toggle.classList.contains("sidebar-dropdown-toggle")) {
+    toggle = toggle.parentElement;
+  }
+  if (!toggle) return false;
+
+  /* Find the parent td and the dropdown div */
+  var td = toggle;
+  while (td && td.tagName !== "TD") {
+    td = td.parentElement;
+  }
+  if (!td) return false;
+
+  var dropdown = td.querySelector(".sidebar-dropdown");
+  var arrow = toggle.querySelector(".dropdown-arrow");
+
+  if (!dropdown || !arrow) return false;
+
+  /* Toggle visibility */
+  var isHidden = dropdown.style.display === "none" || dropdown.style.display === "";
+  dropdown.style.display = isHidden ? "block" : "none";
+  arrow.textContent = isHidden ? "v" : ">";
+
+  return false;
+}
+
 $(function() {
  /* properties box collapsable click handlers */
  $(".properties-header,#properties-collapser").click(function(evt) { properties_collapser(evt); });
 
  /* sidebar dropdown toggle handlers */
- $(".sidebar-dropdown-toggle").click(function(evt) {
-   evt.preventDefault();
-   var $toggle = $(this);
-   var $dropdown = $toggle.closest("td").find(".sidebar-dropdown");
-   var $arrow = $toggle.find(".dropdown-arrow");
-
-   $dropdown.slideToggle(200, function() {
-     if ($dropdown.is(":visible")) {
-       $arrow.text("v");
-     } else {
-       $arrow.text(">");
-     }
-   });
- });
-
- /* make dropdown toggles look like buttons */
+ $(".sidebar-dropdown-toggle").click(toggle_sidebar_dropdown);
  $(".sidebar-dropdown-toggle").css("cursor", "pointer");
 });
 
