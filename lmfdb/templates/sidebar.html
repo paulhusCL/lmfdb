@@ -162,7 +162,7 @@
     {%- endif -%}{# if loop.index is even #}
   {%- endif -%}{# if entry.colspan == "onecolumn" #}
   {%- if (BETA and entry.status == 'beta') or not entry.status -%}
-    {%- if entry.colspan == "onecolumn" -%}
+    {%- if entry.colspan == "onecolumn" and not entry.part2 -%}
       <td colspan=2>
     {%- else -%}
       <td scope="col" width="20%">
