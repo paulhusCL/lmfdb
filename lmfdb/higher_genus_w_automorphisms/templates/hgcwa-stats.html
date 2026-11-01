@@ -1,184 +1,54 @@
 {% extends 'display_stats.html' %}
+
 {% block custom_stats %}
 
-{% set max_cols = 10 %}
-{% set genus_detail = info.by_genus_data %}
+<h2>Counts by {{ KNOWL('ag.curve.genus', 'genus') }}</h2>
 
+<p>
+  Hyperelliptic and cyclic trigonal classes are counted among the topological classes in which
+  $G$ is the {{ KNOWL('curve.highergenus.aut.full', 'full automorphism group') }}.
+</p>
 
-<style>
-table.ntdata th.center {
-  text-align: center;
-}
-
-table.ntdata td {
-  text-align: center;
-}
-</style>
-
-<h2> Distribution by {{KNOWL('ag.curve.genus',title='genus')}}</h2>
-{% for i in range(0, genus_detail | length, max_cols) %}
-<div>
-  <table border=0 cellpadding=3 class="ntdata">
-    <thead>
-      <tr>
-        <th>Genus</th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <th class="center">
-           {{genus.genus_num}}
-        </th>
-        {% endfor %}
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <th>distinct families</th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <td>{{genus.num_families[0]}}</td>
-        {% endfor %}
-      </tr>
-      <tr>
-        <th>distinct  {{KNOWL('curve.highergenus.aut.refinedpassport',title='refined passports')}} </th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <td> <a href={{ url_for('.index', genus=genus.genus_num)}}>{{genus.num_refined_pp[0]}}</a></td>
-        {% endfor %}
-      </tr>
-      <tr>
-        <th>distinct {{KNOWL('curve.highergenus.aut.generatingvector',title='generating vectors')}}  </th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <td>
-          {{genus.num_gen_vectors[0]}}
-        </td>
-        {% endfor %}
-      </tr>
-      <tr>
-        <th>unique  {{KNOWL('group',title='groups')}} </th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <td>
-          <a href={{ url_for('.groups_per_genus', genus=genus.genus_num) }}>{{genus.num_unique_groups}}</a>
-        </td>
-        {% endfor %}
-      </tr>
-      <tr>
-        <th>maximum {{KNOWL('group.order',title='group order')}}</th>
-        {% for genus in genus_detail[i:i+max_cols] %}
-        <td>
-	   <a href={{ url_for('.index', genus=genus.genus_num, group_order=genus.max_grp_order)}}>{{genus.max_grp_order}}</a>
-        </td>
-        {% endfor %}
-      </tr>
-    </tbody>
-  </table>
-</div>
-{% endfor %}
-
-
-<h2>Distinct families by {{KNOWL('ag.curve.genus',title='genus')}} and {{KNOWL('curve.highergenus.aut.quotientgenus',title='quotient genus')}}</h2>
 <table class="ntdata">
   <thead>
-    <tr class="space">
-      <th class="spaceleft">Quotient</th>
-      <th class="level center" colspan="{{genus_detail | length}}">Genus</th>
-    </tr>
-    <tr class="space">
-      <th class="spaceleft">Genus</th>
-      {% for i in range(0, genus_detail | length) %}
-      <th class="level">{{2 + i}}</th>
-      {% endfor %}
+    <tr>
+      <th>{{ KNOWL('ag.curve.genus', 'Genus') }}</th>
+      <th>{{ KNOWL('group.name', 'Groups') }}</th>
+      <th>{{ KNOWL('curve.highergenus.aut.family', 'Families') }}</th>
+      <th>{{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological classes') }}</th>
+      <th>{{ KNOWL('curve.highergenus.aut.full', 'Full') }}</th>
+      <th>{{ KNOWL('ag.hyperelliptic_curve', 'Hyperelliptic') }}</th>
+      <th>{{ KNOWL('ag.cyclic_trigonal', 'Cyclic trigonal') }}</th>
+      <th>{{ KNOWL('curve.highergenus.aut.braid_equivalence', 'Braid classes') }}</th>
+      <th>{{ KNOWL('curve.highergenus.aut.generatingvector', 'Generating vectors') }}</th>
     </tr>
   </thead>
   <tbody>
-    {% for g0 in range(0, info.g0_max + 1) %}
+  {% for row in info.by_genus_data %}
     <tr>
-      <th class="left">{{g0}}</th>
-      {% for j in range(0, genus_detail | length) %}
-      {% set genus = 2 + j %}
-      {% set index = g0 + 1 %}
-      <td class="center">
-        {% if (g0 > (genus / 2) | round(0, 'ceil') | int) %}
-        -
-        {% elif (index >= genus_detail[j].num_families | length) %}
-        -
-        {% else %}
-        {{genus_detail[j].num_families[index]}}
-        {% endif %}
-      </td>
-      {% endfor %}
+      <td align="center"><a href="{{ url_for('.index', genus=row.genus) }}">{{ row.genus }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus, search_type='Families', sort_order='group_order') }}">{{ row.groups }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus, search_type='Families') }}">{{ row.families }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus) }}">{{ row.topological }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus, is_full='yes') }}">{{ row.full }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus, hyperelliptic='yes') }}">{{ row.hyperelliptic }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', genus=row.genus, cyclic_trigonal='yes') }}">{{ row.cyclic_trigonal }}</a></td>
+      <td align="right">{{ row.braid }}</td>
+      <td align="right">{{ row.vectors }}</td>
     </tr>
-    {% endfor %}
+  {% endfor %}
+    <tr>
+      <td align="center">total</td>
+      <td align="right">{{ info.totals.groups }}</td>
+      <td align="right"><a href="{{ url_for('.index', search_type='Families') }}">{{ info.totals.families }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', search_type='List') }}">{{ info.totals.topological }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', is_full='yes') }}">{{ info.totals.full }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', hyperelliptic='yes') }}">{{ info.totals.hyperelliptic }}</a></td>
+      <td align="right"><a href="{{ url_for('.index', cyclic_trigonal='yes') }}">{{ info.totals.cyclic_trigonal }}</a></td>
+      <td align="right">{{ info.totals.braid }}</td>
+      <td align="right">{{ info.totals.vectors }}</td>
+    </tr>
   </tbody>
 </table>
-
-<h2>Distinct  {{KNOWL('curve.highergenus.aut.refinedpassport',title='refined passports')}} by {{KNOWL('ag.curve.genus',title='genus')}} and {{KNOWL('curve.highergenus.aut.quotientgenus',title='quotient genus')}}</h2>
-<table class="ntdata">
-  <thead>
-    <tr class="space">
-      <th class="spaceleft">Quotient</th>
-      <th class="level center" colspan="{{genus_detail | length}}">Genus</th>
-    </tr>
-    <tr class="space">
-      <th class="spaceleft">Genus</th>
-      {% for i in range(0, genus_detail | length) %}
-      <th class="level">{{2 + i}}</th>
-      {% endfor %}
-    </tr>
-  </thead>
-  <tbody>
-    {% for g0 in range(0, info.g0_max + 1) %}
-    <tr>
-      <th class="left">{{g0}}</th>
-      {% for j in range(0, genus_detail | length) %}
-      {% set genus = 2 + j %}
-      {% set index = g0 + 1 %}
-      <td class="center">
-        {% if (g0 > (genus / 2) | round(0, 'ceil') | int) %}
-        -
-        {% elif (index >= genus_detail[j].num_families | length) %}
-        -
-        {% else %}
-         <a href={{ url_for('.index', genus=genus, g0=g0)}}>{{genus_detail[j].num_refined_pp[index]}}</a>
-        {% endif %}
-      </td>
-      {% endfor %}
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-
-<h2>Distinct  {{KNOWL('curve.highergenus.aut.generatingvector',title='generating vectors')}} by {{KNOWL('ag.curve.genus',title='genus')}} and {{KNOWL('curve.highergenus.aut.quotientgenus',title='quotient genus')}}</h2>
-<table class="ntdata">
-  <thead>
-    <tr class="space">
-      <th class="spaceleft">Quotient</th>
-      <th class="level center" colspan="{{genus_detail | length}}">Genus</th>
-    </tr>
-    <tr class="space">
-      <th class="spaceleft">Genus</th>
-      {% for i in range(0, genus_detail | length) %}
-      <th class="level">{{2 + i}}</th>
-      {% endfor %}
-    </tr>
-  </thead>
-  <tbody>
-    {% for g0 in range(0, info.g0_max + 1) %}
-    <tr>
-      <th class="left">{{g0}}</th>
-      {% for j in range(0, genus_detail | length) %}
-      {% set genus = 2 + j %}
-      {% set index = g0 + 1 %}
-      <td class="center">
-        {% if (g0 > (genus / 2) | round(0, 'ceil') | int) %}
-        -
-        {% elif (index >= genus_detail[j].num_families | length) %}
-        -
-        {% else %}
-        {{genus_detail[j].num_gen_vectors[index]}}
-        {% endif %}
-      </td>
-      {% endfor %}
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-
 
 {% endblock %}

@@ -1,0 +1,32 @@
+{% extends "homepage.html" %}
+
+{% block content %}
+
+<p>
+  The {{ KNOWL('curve.highergenus.aut.generatingvector', 'generating vectors') }}, up to simultaneous conjugation, in the
+  {% if info.kind == 'braid' %}
+  {{ KNOWL('curve.highergenus.aut.braid_equivalence', 'braid class') }} {{ info.label }} of the topological class
+  {% else %}
+  {{ KNOWL('curve.highergenus.aut.topological_equivalence', 'topological class') }}
+  {% endif %}
+  <a href="{{ url_for('.by_label', label=info.topological) }}">{{ info.topological }}</a>.
+  The entries are permutations in the LMFDB permutation representation of
+  <a href="{{ url_for('abstract.by_label', label=info.group) }}">{{ info.group }}</a>{% if info.degree %} (of degree ${{ info.degree }}$){% endif %},
+  in cycle notation, with the labels of their {{ KNOWL('group.conjugacy_class', 'conjugacy classes') }}.
+  Products are read from left to right (apply $c_1$ first), and $c_1 c_2 \cdots c_r = 1$.
+</p>
+
+<p>
+  Showing {% if info.number <= info.count and info.start == 0 %}all {{ info.number }}{% else %}{{ info.start + 1 }}-{{ info.upper }} of {{ info.number }}{% endif %} generating vectors.
+  {% if info.prev_url %}<a class="navlink" href="{{ info.prev_url }}">Previous</a>{% endif %}
+  {% if info.next_url %}<a class="navlink" href="{{ info.next_url }}">Next</a>{% endif %}
+</p>
+
+{% with info=info.vector_table %}{% include 'search_results_table.html' %}{% endwith %}
+
+<p>
+  {% if info.prev_url %}<a class="navlink" href="{{ info.prev_url }}">Previous</a>{% endif %}
+  {% if info.next_url %}<a class="navlink" href="{{ info.next_url }}">Next</a>{% endif %}
+</p>
+
+{% endblock %}

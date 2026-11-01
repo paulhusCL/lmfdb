@@ -1,0 +1,33 @@
+{% extends 'embedded_results.html' %}
+
+{% block embedding_content %}
+{% set fam = info.family %}
+
+<p>
+  All actions of {{ info.group_link | safe }} on curves of genus {{ fam.genus }} with
+  {{ KNOWL('curve.highergenus.aut.signature', 'signature') }} ${{ info.signature_display }}$, up to
+  {{ KNOWL('curve.highergenus.aut.topological_equivalence', 'topological equivalence') }}.
+</p>
+
+<h2>{{ KNOWL('curve.highergenus.aut.family', 'Family') }} data</h2>
+<table>
+  <tr><td>{{ KNOWL('ag.curve.genus', 'Genus') }}:</td><td>${{ fam.genus }}$</td></tr>
+  <tr><td>{{ KNOWL('group.name', 'Group') }}:</td><td>{{ info.group_link | safe }}, of {{ KNOWL('group.order', 'order') }} ${{ fam.group_order }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.signature', 'Signature') }}:</td><td>${{ info.signature_display }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.quotientgenus', 'Quotient genus') }}:</td><td>${{ fam.g0 }}$</td></tr>
+  <tr><td>Number of {{ KNOWL('curve.highergenus.aut.branchpoints', 'branch points') }}:</td><td>${{ fam.r }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.dimension', 'Dimension of the family') }}:</td><td>${{ fam.dim }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological classes') }}:</td>
+      <td>${{ fam.num_topological }}$, of which ${{ fam.num_topological_full }}$ with $G$ the {{ KNOWL('curve.highergenus.aut.full', 'full automorphism group') }}</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.braid_equivalence', 'Braid classes') }}:</td><td>${{ fam.num_braid }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.generatingvector', 'Generating vectors') }}:</td><td>${{ fam.num_vectors }}$</td></tr>
+</table>
+
+<h2>{{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological classes') }}</h2>
+<p>
+  Each topological class has its own page, with its braid classes and generating vectors.
+  Hyperelliptic and cyclic trigonal curves are recorded only for the classes in which $G$ is the
+  full automorphism group; for the others, see the full action.
+</p>
+
+{% endblock %}

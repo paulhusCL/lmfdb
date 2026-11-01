@@ -1,0 +1,152 @@
+{% extends "homepage.html" %}
+
+{% block content %}
+{% set data = info.data %}
+
+<p>
+  {{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological class') }} {{ data.top_index }}{% if info.num_top %} of {{ info.num_top }}{% endif %}
+  in the {{ KNOWL('curve.highergenus.aut.family', 'family') }}
+  <a href="{{ url_for('.by_label', label=data.family) }}">{{ data.family }}</a>
+  of actions of {{ info.group_link | safe }} on curves of genus {{ data.genus }} with signature ${{ info.signature_display }}$.
+</p>
+<p>
+  {% if info.prev %}<a href="{{ url_for('.by_label', label=info.prev) }}">&larr; {{ info.prev }}</a>&nbsp;&nbsp;{% endif %}
+  {% if info.next %}<a href="{{ url_for('.by_label', label=info.next) }}">{{ info.next }} &rarr;</a>{% endif %}
+</p>
+
+<h2>Action</h2>
+<table>
+  <tr><td>{{ KNOWL('ag.curve.genus', 'Genus') }}:</td><td>${{ data.genus }}$</td></tr>
+  <tr><td>{{ KNOWL('group.name', 'Group') }}:</td><td>{{ info.group_link | safe }}, of {{ KNOWL('group.order', 'order') }} ${{ data.group_order }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.signature', 'Signature') }}:</td><td>${{ info.signature_display }}$</td></tr>
+  <tr><td>Number of {{ KNOWL('curve.highergenus.aut.branchpoints', 'branch points') }}:</td><td>${{ data.r }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.dimension', 'Dimension of the family') }}:</td><td>${{ data.dim }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.family', 'Family') }}:</td><td><a href="{{ url_for('.by_label', label=data.family) }}">{{ data.family }}</a></td></tr>
+  <tr><td>{{ KNOWL('group.permutation_representation', 'Permutation representation') }}:</td>
+      <td>{% if info.degree %}{{ KNOWL('group.permutation_degree', 'degree') }} ${{ info.degree }}$, {{ KNOWL('group.permutation_gens', 'generators') }} {{ info.perm_gens | safe }}{% else %}not available{% endif %}</td></tr>
+</table>
+
+<h2>{{ KNOWL('curve.highergenus.aut.full', 'Full automorphism group') }}</h2>
+{% if data.is_full %}
+<p>$G$ is the full automorphism group of the generic curve in this class.</p>
+{% else %}
+<p>$G$ is <b>not</b> the full automorphism group: every curve in this class has more automorphisms.</p>
+<table>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.full', 'Full automorphism group') }}:</td>
+      <td>{{ info.full_auto_display | safe }}{% if data.full_auto %}, of {{ KNOWL('group.order', 'order') }} ${{ data.full_auto_order }}${% endif %}</td></tr>
+  {% if info.signH_display %}
+  <tr><td>{{ KNOWL('curve.highergenus.aut.signature', 'Signature') }} of the full action:</td><td>${{ info.signH_display }}$</td></tr>
+  {% endif %}
+  <tr><td>{{ KNOWL('curve.highergenus.aut.full_index', 'Index') }} $[\mathrm{Aut}:G]$:</td><td>${{ data.full_index }}$</td></tr>
+  {% if data.full_label %}
+  <tr><td>Family of the full action:</td><td><a href="{{ url_for('.by_label', label=data.full_label) }}">{{ data.full_label }}</a></td></tr>
+  {% endif %}
+  {% if data.full_steps %}
+  <tr><td>{{ KNOWL('curve.highergenus.aut.full_steps', 'Extension steps') }}:</td><td>{{ data.full_steps | join(', ') }}</td></tr>
+  {% endif %}
+</table>
+{% if info.full_gen_vector %}
+<p>
+  A {{ KNOWL('curve.highergenus.aut.generatingvector', 'generating vector') }} of the full action,
+  by permutations of degree ${{ info.full_gen_degree }}$
+  (<a href="#" onclick="$('.fullvec').toggle(); return false;"><span class="fullvec">show</span><span class="fullvec nodisplay">hide</span></a>).
+</p>
+<div class="fullvec nodisplay">
+  <p>This vector is in a permutation representation of the full automorphism group built in the computation, not the LMFDB permutation representation, so its entries have no LMFDB conjugacy class labels.</p>
+  <table>
+    {% for perm in info.full_gen_vector %}
+    <tr><td>$c_{ {{- loop.index -}} }$</td><td>${{ perm }}$</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endif %}
+
+<h2>Curves</h2>
+{% if data.is_full %}
+<table>
+  <tr><td>{{ KNOWL('ag.hyperelliptic_curve', 'Hyperelliptic') }}:</td><td>{% if data.hyperelliptic %}yes{% elif data.hyperelliptic is none %}not computed{% else %}no{% endif %}</td></tr>
+  {% if data.hyperelliptic and data.hyp_involution %}
+  <tr><td>{{ KNOWL('curve.highergenus.aut.hyperelliptic_involution', 'Hyperelliptic involution') }}:</td>
+      <td>{{ info.hyp_involution_display | safe }}</td></tr>
+  {% endif %}
+  {% if data.eqn %}
+  <tr><td>{{ KNOWL('curve.highergenus.aut.equation', 'Equation') }}:</td><td>${{ data.eqn }}$</td></tr>
+  {% endif %}
+  <tr><td>{{ KNOWL('ag.cyclic_trigonal', 'Cyclic trigonal') }}:</td><td>{% if data.cyclic_trigonal %}yes{% elif data.cyclic_trigonal is none %}not computed{% else %}no{% endif %}</td></tr>
+  {% if data.cyclic_trigonal and data.cinv %}
+  <tr><td>{{ KNOWL('ag.cyclic_trigonal', 'Trigonal automorphism') }}:</td>
+      <td>{{ info.cinv_display | safe }}{% if data.cinv_normal is not none %}, generating a {% if data.cinv_normal %}normal{% else %}non-normal{% endif %} subgroup{% endif %}</td></tr>
+  {% endif %}
+</table>
+{% else %}
+<p>
+  Hyperelliptic and cyclic trigonal curves, and equations, are recorded for the full action only
+  {% if data.full_label %}(see the family <a href="{{ url_for('.by_label', label=data.full_label) }}">{{ data.full_label }}</a>){% endif %}.
+</p>
+{% endif %}
+
+<h2>{{ KNOWL('curve.highergenus.aut.groupalgebradecomp', 'Jacobian decomposition') }}</h2>
+{% if info.jacobian %}
+<p>
+  $J(X) \sim {{ info.jacobian }}$
+  {% if info.same_chars %}(the same for every braid class in this topological class){% endif %}
+</p>
+{% if info.jacobian_table %}
+{% with info=info.jacobian_table %}{% include 'search_results_table.html' %}{% endwith %}
+{% elif not info.same_chars %}
+<p>
+  The {{ KNOWL('curve.highergenus.aut.characters', 'rational characters') }} of the factors differ between
+  braid classes; they are listed in the table of braid classes below.
+</p>
+{% endif %}
+{% else %}
+<p>The Jacobian decomposition has not been computed for this topological class.</p>
+{% endif %}
+
+<h2 id="vectors">{{ KNOWL('curve.highergenus.aut.braid_equivalence', 'Braid classes') }} and {{ KNOWL('curve.highergenus.aut.generatingvector', 'generating vectors') }}</h2>
+<p>
+  This topological class consists of ${{ data.num_braid }}$ braid {% if data.num_braid == 1 %}class{% else %}classes{% endif %}
+  containing ${{ data.num_vectors }}$ generating {% if data.num_vectors == 1 %}vector{% else %}vectors{% endif %}
+  up to simultaneous conjugation{% if info.tuple_table %}, with ${{ info.tuple_table.results | length }}$ distinct
+  {{ KNOWL('curve.highergenus.aut.conjugacyclasses', 'class tuples') }}{% endif %}
+  (<a href="{{ url_for('.vector_listing', label=info.label) }}">list all generating vectors</a>).
+  The entries of a generating vector $(c_1, \ldots, c_r)$ are permutations in the LMFDB permutation
+  representation of $G${% if info.degree %} (of degree ${{ info.degree }}$){% endif %}, in cycle notation, with the labels of their
+  {{ KNOWL('group.conjugacy_class', 'conjugacy classes') }}.
+  Products are read from left to right (apply $c_1$ first), and $c_1 c_2 \cdots c_r = 1$.
+</p>
+
+{% if info.rep_table %}
+<h3>Representative generating vector ({{ data.rep_vector }})</h3>
+{% with info=info.rep_table %}{% include 'search_results_table.html' %}{% endwith %}
+{% endif %}
+
+{% if info.tuple_table %}
+<h3>{{ KNOWL('curve.highergenus.aut.conjugacyclasses', 'Class tuples') }}</h3>
+{% if info.tuple_table.results | length > 8 %}
+<p>
+  ${{ info.tuple_table.results | length }}$ class tuples occur
+  (<a href="#" onclick="$('.classtuples').toggle(); return false;"><span class="classtuples">show</span><span class="classtuples nodisplay">hide</span></a>).
+</p>
+<div class="classtuples nodisplay">
+{% with info=info.tuple_table %}{% include 'search_results_table.html' %}{% endwith %}
+</div>
+{% else %}
+{% with info=info.tuple_table %}{% include 'search_results_table.html' %}{% endwith %}
+{% endif %}
+{% endif %}
+
+<h3 id="braid-classes">Braid classes</h3>
+<p>
+  Each row shows a braid class and its first generating vector.
+  {% if data.num_braid > info.braid_table.results | length %}
+  Showing the first ${{ info.braid_table.results | length }}$ of ${{ data.num_braid }}$ braid classes
+  {% if not info.show_all %}(<a href="{{ url_for('.by_label', label=info.label, braids='all') }}#braid-classes">show all</a>){% endif %}.
+  {% elif info.show_all and data.num_braid > info.braid_rows_shown %}
+  (<a href="{{ url_for('.by_label', label=info.label) }}#braid-classes">show fewer</a>)
+  {% endif %}
+</p>
+{% with info=info.braid_table %}{% include 'search_results_table.html' %}{% endwith %}
+
+{% endblock %}

@@ -1,63 +1,54 @@
-# This Blueprint is about higher genus curves
+# This Blueprint is about higher genus curves with automorphisms
 # Authors: Jen Paulhus, Lex Martin, David Neill Asanza, Nhi Ngo, Albert Ford
 # (initial code copied from John Jones Local Fields)
+#
+# The data lives in four tables:
+#   hgcwa_families     one row per (genus, group, signature)
+#   hgcwa_topological  one row per topological class of actions (the main objects)
+#   hgcwa_braid        one row per braid class
+#   hgcwa_vectors      one row per generating vector, up to simultaneous conjugation
+# Labels are family = g.n-i.g0.m1-...-mr, then family.T, family.T.B, family.T.B.V.
 
-import ast
 import os
 import re
-from io import BytesIO
-import yaml
 
-from flask import render_template, request, url_for, redirect, send_file, abort
-from sage.all import Permutation
+import yaml
+from flask import render_template, request, url_for, redirect, abort
+from psycodict.utils import SearchParsingError
 
 from lmfdb import db
 from lmfdb.utils import (
-    flash_error, to_dict, Downloader,
-    SearchArray, TextBox, ExcludeOnlyBox, CountBox,
-    parse_ints, clean_input, parse_bracketed_posints, parse_gap_id,
-    search_wrap, redirect_no_cache)
+    flash_error, to_dict, comma, Downloader,
+    SearchArray, EmbeddedSearchArray, TextBox, YesNoBox, CountBox, SneakyTextBox,
+    parse_ints, parse_bool, parse_element_of, clean_input,
+    search_wrap, embed_wrap, redirect_no_cache)
 from lmfdb.utils.interesting import interesting_knowls
-from lmfdb.utils.search_parsing import (search_parser, collapse_ors)
-from lmfdb.utils.search_columns import SearchColumns, LinkCol, MathCol, ProcessedCol, CheckCol
+from lmfdb.utils.search_parsing import search_parser, collapse_ors, parse_range2, LIST_RE
+from lmfdb.utils.search_columns import (
+    SearchColumns, LinkCol, MathCol, ProcessedCol, MultiProcessedCol, CheckCol)
 from lmfdb.api import datapage
-from lmfdb.sato_tate_groups.main import sg_pretty
+from lmfdb.groups.abstract.main import abstract_group_display_knowl
 from lmfdb.higher_genus_w_automorphisms import higher_genus_w_automorphisms_page
 from lmfdb.higher_genus_w_automorphisms.hgcwa_stats import HGCWAstats
-from lmfdb.logger import logger
-from collections import defaultdict
+from lmfdb.higher_genus_w_automorphisms.hgcwa_helpers import (
+    label_kind, split_label, parent_label, relative_label, label_sort_key, vector_labels,
+    family_label_parts,
+    unrank_perm, cycle_string, signature_display, jacobian_tex, jacobian_factor_tex,
+    class_tuple_summary, parse_signature, parse_periods, parse_group_labels)
 
+# Number of braid classes shown on a topological class page before "show all"
+BRAID_ROWS_SHOWN = 20
+# Never show more braid classes than this on one page (use the vector listing instead)
+BRAID_ROWS_MAX = 2000
+# Above this many vectors, the class tuple summary is not computed on the page
+CLASS_TUPLE_MAX_VECTORS = 10000
+# Default number of vectors per page in the vector listing
+VECTORS_PER_PAGE = 50
 
-#Parsing group order
-LIST_RE = re.compile(r'^(\d+|(\d*-(\d+)?)|((\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\))))(,(\d+|(\d*-(\d+)?)|((\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\)))))*$')
-GENUS_RE = re.compile(r'^(\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\))$')
+# Groups whose genus 2 curves can be found in the genus 2 section
+# (the automorphism groups of genus 2 curves)
+G2_AUT_GROUPS = ["2.1", "4.2", "8.3", "10.2", "12.4", "24.8", "48.29"]
 
-# Determining what kind of label
-family_label_regex = re.compile(r'(\d+)\.(\d+-\d+)\.(\d+\.\d+-?[^\.]*$)')
-passport_label_regex = re.compile(r'((\d+)\.(\d+-\d+)\.(\d+\.\d+.*))\.(\d+)')
-vector_label_regex = re.compile(r'(\d+\.\d+-\d+\.\d+\.\d+.*)\.(\d+)\.(\d+)')
-cc_label_regex = re.compile(r'((\d+)\.(\d+-\d+)\.(\d+)\.(\d+.*))\.(\d+)')
-hgcwa_group = re.compile(r'\[(\d+),(\d+)\]')
-
-def label_is_one_family(lab):
-    return family_label_regex.match(lab)
-
-
-def label_is_one_passport(lab):
-    return passport_label_regex.match(lab)
-
-def label_is_one_vector(lab):
-    return vector_label_regex.match(lab)
-
-
-def split_family_label(lab):
-    return family_label_regex.match(lab).groups()
-
-def split_passport_label(lab):
-    return passport_label_regex.match(lab).groups()
-
-def split_vector_label(lab):
-    return vector_label_regex.match(lab).groups()
 
 def get_bread(tail=[]):
     base = [("Higher genus", url_for(".index")),
@@ -75,424 +66,531 @@ def learnmore_list():
             ('Labeling convention', url_for(".labels_page"))]
 
 
-# Return the learnmore list with the matchstring entry removed
-def learnmore_list_remove(matchstring):
-    return [t for t in learnmore_list() if t[0].find(matchstring) < 0]
+def url_for_label(label):
+    if label == "random":
+        return url_for(".random_topological")
+    return url_for(".by_label", label=label)
 
 
-def tfTOyn(b: bool):
-    return "yes" if b else "no"
+def family_bread(family, group_tex=None, tail=[]):
+    """
+    Bread crumbs genus -> group -> signature (the family) -> tail.
+    """
+    genus, group, sig = family_label_parts(family)
+    name = "$%s$" % group_tex if group_tex else group
+    return get_bread([(str(genus), url_for(".index", genus=genus)),
+                      (name, url_for(".index", genus=genus, group=group)),
+                      ("$%s$" % signature_display(sig), url_for(".by_label", label=family))] + tail)
 
 
-# Convert [4,1] to 4.1, then  apply sg_pretty
-def group_display(strg):
-    return sg_pretty(re.sub(hgcwa_group, r'\1.\2', strg))
+# Groups ####################################################################
+# Names, links and permutation representations come from the LMFDB groups tables.
+
+def group_cache(labels, extra=[]):
+    """
+    One query for the records of the given groups in gps_groups, as a dictionary
+    indexed by label.
+    """
+    labels = sorted({lab for lab in labels if lab})
+    if not labels:
+        return {}
+    proj = ["label", "tex_name"] + list(extra)
+    return {rec["label"]: rec for rec in db.gps_groups.search({"label": {"$in": labels}}, proj)}
 
 
-def sign_display(L):
-    sizeL = len(L)
-    if sizeL == 1:
-        signL = "[ " + str(L[0]) + "; -]"
-    else:
-        signL = "[ " + str(L[0]) + "; "
-        for i in range(1, sizeL-1):
-            signL = signL + str(L[i]) + ", "
-        signL = signL + str(L[sizeL-1]) + " ]"
-    return signL
-
-def cc_display(L):
-    sizeL = len(L)
-    if sizeL == 0:
-        return
-    if sizeL == 1:
-        return str(L[0])
-    stg = str(L[0]) + ", "
-    for i in range(1, sizeL-1):
-        stg = stg + str(L[i])+", "
-    stg = stg + str(L[sizeL-1])
-    return stg
+def group_tex(label, cache):
+    rec = (cache or {}).get(label)
+    if rec is None:
+        return None
+    return rec.get("tex_name")
 
 
-# for splitting permutations cycles
-sep = ' '
+def group_knowl(label, cache):
+    """
+    A group as a knowl showing its name; the label is shown if the group has no name.
+    """
+    if not label:
+        return ""
+    tex = group_tex(label, cache)
+    return abstract_group_display_knowl(label, name=("$%s$" % tex) if tex else label)
 
-def split_perm(strg):
-    startpoint = 0
-    for i in range(0, len(strg)):
-        if strg[i] == ")":
-            yield strg[startpoint:i+1]
-            startpoint = i+1
 
-def sort_sign(L):
-    L1 = sorted(L[1:])
-    return [L[0]] + L1
+def group_link(label, cache):
+    """
+    The name of a group, linked to its page, followed by its label.
+    """
+    tex = group_tex(label, cache)
+    url = url_for("abstract.by_label", label=label)
+    if tex:
+        return '<a href="%s">$%s$</a> (%s)' % (url, tex, label)
+    return '<a href="%s">%s</a>' % (url, label)
 
-def label_to_breadcrumbs(L):
-    newsig = '['+L[0]
-    for i in range(1, len(L)):
-        if (L[i] == '-'):
-            newsig += ","
-        elif (L[i] == '.'):
-            newsig += ';'
-        elif (L[i] == '0' and L[i-1] == '.'):  # The case where there is no ramification gives a 0 in signature
-            newsig += '-'
-        else:
-            newsig += L[i]
 
-    newsig += ']'
-    return newsig
+def perm_rep(rec):
+    """
+    The degree and the generators (as lists of images) of the LMFDB permutation
+    representation of a group, from its gps_groups record; (None, []) if missing.
+    """
+    try:
+        rep = rec["representations"]["Perm"]
+        d = rep["d"]
+        return d, [unrank_perm(g, d) for g in rep["gens"]]
+    except (KeyError, TypeError, ValueError):
+        return None, []
 
-def decjac_format(decjac_list):
-    entries = []
-    for ints in decjac_list:
-        entry = ""
-        if ints[0] == 1:
-            entry = entry + "E"
-        else:
-            entry = entry + "A_{" + str(ints[0]) + "}"
-        if ints[1] != 1:
-            entry = entry + "^{" + str(ints[1]) + "}"
-        entries.append(entry)
-    latex = "\\times ".join(entries)
-    ccClasses = cc_display([ints[2] for ints in decjac_list])
-    return latex, ccClasses
 
-# Turn 'i.j' in the total label in to cc displayed in mongo
-def cc_to_list(cc):
-    l = cc.split('.')
-    return [int(l[1]), int(l[-1])]
+def cc_knowl(group, label):
+    """
+    A conjugacy class label of a group as a dynamic knowl (as on abstract group pages).
+    """
+    if not label:
+        return ""
+    return ('<a title="%s [lmfdb.object_information]" knowl="lmfdb.object_information" '
+            'kwargs="func=cc_data&args=%s%%7C%s%%7Ccomplex">%s</a>' % (label, group, label, label))
+
+
+def class_tuple_display(group, con):
+    if not con:
+        return ""
+    return ", ".join(cc_knowl(group, cl) for cl in con)
+
+
+def qchar_link(group, char):
+    """
+    A rational character label, linked to the rational character table of the group.
+    """
+    url = url_for("abstract.Qchar_table", label=group, char_highlight=char)
+    return '<a href="%s">%s</a>' % (url, char)
+
+
+def perm_display(perm):
+    """
+    A permutation (list of images, or the string from ``entry_data``) in cycle notation, in math mode.
+    """
+    if perm is None or perm == "":
+        return ""
+    if isinstance(perm, list):
+        perm = cycle_string(perm)
+    return "$%s$" % perm
+
+
+def entry_data(code, d):
+    """
+    The cycle notation of a stored permutation code, or the code itself if the
+    degree of the permutation representation is unknown.
+    """
+    if d is None:
+        return "code %s" % code
+    return cycle_string(unrank_perm(code, d))
+
+
+# Search columns ############################################################
+# Derived values are computed by search columns, as in the rest of the LMFDB.
+
+def group_col(group, tex_cache):
+    return group_knowl(group, tex_cache)
+
+
+def aut_col(is_full, group, full_auto, full_auto_order, tex_cache):
+    """
+    The full automorphism group of the generic curve: G itself when the action is full.
+    """
+    if is_full:
+        return group_knowl(group, tex_cache)
+    if full_auto:
+        return group_knowl(full_auto, tex_cache)
+    if full_auto_order:
+        return "order $%s$ (not in the LMFDB)" % full_auto_order
+    return ""
+
+
+def aut_download(is_full, group, full_auto, full_auto_order, tex_cache):
+    if is_full:
+        return group
+    return full_auto
+
+
+def sig_col(sig):
+    return signature_display(sig) if sig else ""
+
+
+def jac_col(dims):
+    return jacobian_tex(dims) if dims else ""
+
+
+def tex_cache_postprocess(res, info, query):
+    """
+    Adds the names of all groups in the results with one gps_groups query.
+    """
+    cache = group_cache([rec.get("group") for rec in res] + [rec.get("full_auto") for rec in res])
+    for rec in res:
+        rec["tex_cache"] = cache
+    return res
+
+
+def family_top_postprocess(res, info, query):
+    """
+    As tex_cache_postprocess, and adds the class tuple of the representative vector
+    of each topological class (one hgcwa_vectors query).
+    """
+    res = tex_cache_postprocess(res, info, query)
+    reps = [rec["rep_vector"] for rec in res if rec.get("rep_vector")]
+    cons = {}
+    if reps:
+        cons = {rec["label"]: rec["con"] for rec in db.hgcwa_vectors.search({"label": {"$in": reps}}, ["label", "con"])}
+    for rec in res:
+        rec["rep_con"] = cons.get(rec.get("rep_vector"))
+    return res
+
+
+def _db_cols(columns, extra=[]):
+    return sorted(set(sum([C.orig for C in columns], [])) | set(extra))
+
+
+label_col = LinkCol("label", "dq.curve.highergenus.aut.label", "Label", url_for_label)
+genus_col = MathCol("genus", "ag.curve.genus", "Genus")
+group_name_col = MultiProcessedCol("group", "group.name", "Group", ["group", "tex_cache"], group_col,
+                                   apply_download=lambda group, tex_cache: group)
+group_order_col = MathCol("group_order", "group.order", "Group order", default=False)
+signature_col = ProcessedCol("signature", "curve.highergenus.aut.signature", "Signature", sig_col,
+                             mathmode=True, align="center")
+r_col = MathCol("r", "curve.highergenus.aut.branchpoints", "$r$", short_title="branch points", default=False)
+dim_col = MathCol("dim", "curve.highergenus.aut.dimension", "Dimension")
+is_full_col = CheckCol("is_full", "curve.highergenus.aut.full", "Full", short_title="full")
+aut_group_col = MultiProcessedCol("aut", "curve.highergenus.aut.full", "Aut",
+                                  ["is_full", "group", "full_auto", "full_auto_order", "tex_cache"],
+                                  aut_col, apply_download=aut_download, short_title="full automorphism group")
+signH_col = ProcessedCol("signH", "curve.highergenus.aut.signature", "Aut signature", sig_col,
+                         mathmode=True, align="center", default=False)
+full_index_col = MathCol("full_index", "curve.highergenus.aut.full_index", r"$[\mathrm{Aut}:G]$",
+                         short_title="index [Aut:G]", default=False)
+hyp_col = CheckCol("hyperelliptic", "ag.hyperelliptic_curve", "Hyperelliptic", unknown="")
+trig_col = CheckCol("cyclic_trigonal", "ag.cyclic_trigonal", "Cyclic trigonal", unknown="")
+jac_dims_col = ProcessedCol("jacobian_dims", "curve.highergenus.aut.groupalgebradecomp", "Jacobian",
+                            jac_col, mathmode=True, align="center", short_title="Jacobian decomposition")
+num_braid_col = MathCol("num_braid", "curve.highergenus.aut.braid_equivalence", "Braid classes")
+num_vectors_col = MathCol("num_vectors", "curve.highergenus.aut.generatingvector", "Vectors",
+                          short_title="generating vectors")
+
+# Search results: topological classes
+hgcwa_columns = SearchColumns([
+    label_col, genus_col, group_name_col, group_order_col, signature_col, r_col, dim_col,
+    is_full_col, aut_group_col, signH_col, full_index_col, hyp_col, trig_col,
+    jac_dims_col, num_braid_col, num_vectors_col,
+    LinkCol("family", "curve.highergenus.aut.family", "Family", url_for_label, default=False)])
+hgcwa_columns.languages = ['text', 'gap', 'magma', 'sage', 'csv']
+
+# Search results: families
+family_columns = SearchColumns([
+    label_col, genus_col, group_name_col, group_order_col, signature_col, r_col, dim_col,
+    MathCol("num_topological", "curve.highergenus.aut.topological_equivalence", "Topological classes"),
+    MathCol("num_topological_full", "curve.highergenus.aut.full", "Full", short_title="full topological classes"),
+    num_braid_col, num_vectors_col])
+family_columns.languages = ['text', 'gap', 'magma', 'sage', 'csv']
+
+# The topological classes of one family, on the family page
+_family_top_cols = [
+    label_col, is_full_col, aut_group_col,
+    ProcessedCol("signH", "curve.highergenus.aut.signature", "Aut signature", sig_col, mathmode=True, align="center"),
+    MathCol("full_index", "curve.highergenus.aut.full_index", r"$[\mathrm{Aut}:G]$", short_title="index [Aut:G]"),
+    hyp_col, trig_col, jac_dims_col, num_braid_col, num_vectors_col,
+    MultiProcessedCol("rep_con", "curve.highergenus.aut.conjugacyclasses", "Class tuple", ["group", "rep_con"],
+                      class_tuple_display, apply_download=lambda group, con: con,
+                      short_title="class tuple of the representative vector")]
+family_top_columns = SearchColumns(_family_top_cols, db_cols=_db_cols(_family_top_cols, ["rep_vector"]))
+family_top_columns.languages = ['text', 'gap', 'magma', 'sage', 'csv']
+
+
+def entry_col(i, period):
+    """
+    The column for the entry c_i of the generating vectors in a table of vectors:
+    its conjugacy class label above the permutation.
+    """
+    def disp(group, entry):
+        if not entry:
+            return ""
+        cl, perm = entry
+        return "%s<br>%s" % (cc_knowl(group, cl), perm_display(perm))
+    return MultiProcessedCol("c%s" % i, "curve.highergenus.aut.generatingvector",
+                             "$c_{%s}$ (order $%s$)" % (i, period), ["group", "c%s" % i], disp,
+                             apply_download=lambda group, entry: entry, short_title="c%s" % i)
+
+
+def braid_label_display(label):
+    return '<span id="%s">%s</span>' % (label, relative_label(label))
+
+
+def vector_count_display(label, num_vectors):
+    if num_vectors > 1:
+        return '<a href="%s">%s</a>' % (url_for(".vector_listing", label=label), num_vectors)
+    return str(num_vectors)
+
+
+def braid_table_columns(signature, show_chars):
+    """
+    The braid classes of a topological class, each with its representative vector.
+    """
+    cols = [ProcessedCol("label", "curve.highergenus.aut.braid_equivalence", "Braid class", braid_label_display),
+            MultiProcessedCol("num_vectors", "curve.highergenus.aut.generatingvector", "Vectors",
+                              ["label", "num_vectors"], vector_count_display, align="center")]
+    cols += [entry_col(i + 1, m) for i, m in enumerate(signature[1:])]
+    if show_chars:
+        cols.append(MultiProcessedCol("chars", "curve.highergenus.aut.characters", "Characters",
+                                      ["group", "chars"],
+                                      lambda group, chars: ", ".join(qchar_link(group, c) for c in chars)))
+    return SearchColumns(cols)
+
+
+def vector_table_columns(signature, show_braid):
+    """
+    A list of generating vectors (vector listing page).
+    """
+    cols = [ProcessedCol("label", "curve.highergenus.aut.generatingvector", "Vector", braid_label_display)]
+    if show_braid:
+        cols.append(ProcessedCol("braid", "curve.highergenus.aut.braid_equivalence", "Braid class",
+                                 lambda lab: '<a href="%s">%s</a>' % (url_for(".by_label", label=lab), relative_label(lab))))
+    cols += [entry_col(i + 1, m) for i, m in enumerate(signature[1:])]
+    return SearchColumns(cols)
+
+
+# The representative generating vector, one entry per row
+rep_vector_columns = SearchColumns([
+    MathCol("entry", "curve.highergenus.aut.generatingvector", "Entry"),
+    ProcessedCol("perm", "group.permutation_representation", "Permutation", perm_display),
+    MultiProcessedCol("cl", "group.conjugacy_class", "Conjugacy class", ["group", "cl"], cc_knowl),
+    MathCol("order", "group.element_order", "Order")])
+
+# Distinct tuples of conjugacy classes in a topological class
+class_tuple_columns = SearchColumns([
+    MultiProcessedCol("con", "curve.highergenus.aut.conjugacyclasses", "Class tuple", ["group", "con"], class_tuple_display),
+    MathCol("num_vectors", "curve.highergenus.aut.generatingvector", "Vectors"),
+    MathCol("num_braid", "curve.highergenus.aut.braid_equivalence", "Braid classes")])
+
+# The group algebra decomposition of the Jacobian
+jacobian_columns = SearchColumns([
+    MultiProcessedCol("factor", "curve.highergenus.aut.groupalgebradecomp", "Factor", ["dim", "mult"],
+                      lambda d, m: "$%s$" % jacobian_factor_tex(d, m)),
+    MathCol("dim", "ag.dimension", "Dimension"),
+    MathCol("mult", "curve.highergenus.aut.groupalgebradecomp", "Multiplicity"),
+    MultiProcessedCol("char", "curve.highergenus.aut.characters", "Rational character", ["group", "char"],
+                      qchar_link)])
+
+
+# Downloads #################################################################
+
+_curdir = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(_curdir, "code.yaml")) as _codefile:
+    code_list = yaml.safe_load(_codefile)
+
+
+class HGCWA_download(Downloader):
+    table = db.hgcwa_topological
+    title = "Topological classes of group actions on higher genus curves"
+    short_name = "topological classes"
+    var_name = "topological_classes"
+    vector_languages = ["magma", "gap", "sage"]
+
+    def postprocess(self, row, info, query):
+        # The class tuple column of the family page needs the representative vector
+        if row.get("rep_vector") and "rep_con" not in row:
+            row["rep_con"] = db.hgcwa_vectors.lookup(row["rep_vector"], "con")
+        return row
+
+    def download_vectors(self, label, lang):
+        """
+        All generating vectors of a family, topological class or braid class,
+        as permutations in the LMFDB permutation representation of the group.
+        """
+        if lang not in self.vector_languages:
+            return abort(404, "Unknown download type %s" % lang)
+        kind = label_kind(label)
+        if kind not in ["family", "topological", "braid"]:
+            return abort(404, "Invalid label %s" % label)
+        family = split_label(label)[0]
+        fam = db.hgcwa_families.lookup(family, ["genus", "group", "signature"])
+        vecs = list(db.hgcwa_vectors.search({kind: label}, ["label", "con", "gen_vectors"]))
+        if fam is None or not vecs:
+            return abort(404, "No generating vectors for label %s" % label)
+        vecs.sort(key=lambda rec: label_sort_key(rec["label"]))
+        grp = db.gps_groups.lookup(fam["group"], ["representations"])
+        d, gens = perm_rep(grp)
+        if d is None:
+            return abort(404, "The group %s has no permutation representation in the LMFDB" % fam["group"])
+        language = self.languages[lang]
+        s = language.comment(
+            " Generating vectors (c_1, ..., c_r) of %s, up to simultaneous conjugation.\n"
+            " The entries are permutations in the LMFDB permutation representation of the group %s,\n"
+            " of degree %s.  Products are read from left to right (apply c_1 first),\n"
+            " and c_1 c_2 ... c_r = 1.\n"
+            " conjugacy_classes gives the LMFDB labels of the conjugacy classes of the entries.\n\n"
+            % (label, fam["group"], d))
+        s += language.assign("label", label)
+        s += language.assign("group_label", fam["group"])
+        s += language.assign("genus", fam["genus"])
+        s += language.assign("signature", fam["signature"])
+        s += language.assign("d", d)
+        s += language.assign("gens", gens)
+        s += language.assign("vector_labels", [rec["label"] for rec in vecs])
+        s += language.assign("conjugacy_classes", [rec["con"] for rec in vecs])
+        s += language.assign("vector_data", [[unrank_perm(c, d) for c in rec["gen_vectors"]] for rec in vecs])
+        s += "\n" + language.comment(" The group and the vectors as permutations\n")
+        for key in ["group", "vectors", "check"]:
+            s += code_list[key][lang]
+        return self._wrap(s, label + ".vectors", lang=lang,
+                          title="Generating vectors of %s," % label)
+
+
+class HGCWA_family_download(Downloader):
+    table = db.hgcwa_families
+    title = "Families of higher genus curves with automorphisms"
+    short_name = "families"
+    var_name = "families"
+
+
+@higher_genus_w_automorphisms_page.route("/<label>/download/<download_type>")
+def hgcwa_code_download(label, download_type):
+    return HGCWA_download().download_vectors(label, download_type)
+
+
+def vector_downloads(label):
+    return [('Generating vectors to Magma', url_for(".hgcwa_code_download", label=label, download_type='magma')),
+            ('Generating vectors to GAP', url_for(".hgcwa_code_download", label=label, download_type='gap')),
+            ('Generating vectors to SageMath', url_for(".hgcwa_code_download", label=label, download_type='sage')),
+            ('Underlying data', url_for(".hgcwa_data", label=label))]
+
+
+# Browse, search, random, interesting, statistics ##########################
 
 @higher_genus_w_automorphisms_page.route("/")
 def index():
-    bread = get_bread()
-    info = to_dict(request.args, search_array=HGCWASearchArray())
+    info = to_dict(request.args, search_array=HGCWASearchArray(), stats=HGCWAstats())
     if request.args:
+        search_type = info.get("search_type", info.get("hst", ""))
+        if search_type in ["Families", "RandomFamily"]:
+            return hgcwa_family_search(info)
         return higher_genus_w_automorphisms_search(info)
-    genus_max = db.hgcwa_passports.max('genus')
-    genus_list = list(range(2, genus_max + 1))
-    info['count'] = 50
-    info['genus_list'] = genus_list
-    info['short_summary'] = HGCWAstats().short_summary
-
+    small = db.hgcwa_families.distinct("group", {"group_order": {"$lte": 12}})
+    cache = group_cache(small)
+    small.sort(key=lambda lab: [int(x) if x.isdigit() else x for x in lab.split(".")])
+    info["browse_groups"] = [(lab, group_tex(lab, cache)) for lab in small]
+    info["browse_r"] = sorted(db.hgcwa_families.distinct("r"))
+    info["browse_orders"] = ["2-9", "10-19", "20-49", "50-199", "200-999", "1000-"]
     return render_template("hgcwa-index.html",
                            title="Families of higher genus curves with automorphisms",
-                           bread=bread,
+                           bread=get_bread(),
                            info=info,
                            learnmore=learnmore_list())
 
 
 @higher_genus_w_automorphisms_page.route("/random")
 @redirect_no_cache
-def random_passport():
-    label = db.hgcwa_passports.random(projection='passport_label')
-    return url_for(".by_passport_label", passport_label=label)
+def random_topological():
+    label = db.hgcwa_topological.random()
+    return url_for(".by_label", label=label)
+
 
 @higher_genus_w_automorphisms_page.route("/interesting")
 def interesting():
     return interesting_knowls(
         "curve.highergenus.aut",
-        db.hgcwa_passports,
+        db.hgcwa_topological,
         url_for_label,
         label_col="label",
-        title=r"Some interesting higher genus families",
+        regex=re.compile(r"^\d+\.\d+-[0-9a-z]+\.\d+\.\d+(-\d+)*(\.\d+)?$"),
+        title=r"Some interesting higher genus families and topological classes",
         bread=get_bread("Interesting"),
         learnmore=learnmore_list()
     )
 
+
 @higher_genus_w_automorphisms_page.route("/stats")
 def statistics():
-    title = 'Families of higher genus curves with automorphisms: Statistics'
+    title = 'Families of higher genus curves with automorphisms: statistics'
     bread = get_bread('Statistics')
     return render_template("hgcwa-stats.html", info=HGCWAstats(), title=title, learnmore=learnmore_list(), bread=bread)
 
 
-@higher_genus_w_automorphisms_page.route("/stats/groups_per_genus/<int:genus>")
-def groups_per_genus(genus):
-    un_grps = db.hgcwa_unique_groups
-    # Redirect to 404 if statistic is not found
-    if not un_grps.count({'genus':genus}):
-        return abort(404, 'Group statistics for curves of genus %s not found in database.' % genus)
-
-    info = {}
-    gp_data = un_grps.search({'genus':genus},projection=['group','g0_is_gt0','g0_gt0_list','gen_vectors','topological','braid'],info=info)
-
-    # Make list groups_0 where each entry is a list [ group, gen_vectors, tops, braids
-    groups_0 = []
-    # Make list groups_gt0 where each entry is a list [group, gen_vectors]
-    groups_gt0 = []
-
-    complete_info = db.hgcwa_complete.lucky({'genus':genus})
-    show_top_braid = complete_info['top_braid_compute']
-    show_g0_gt0 = complete_info['g0_gt0_compute']
-
-    for dataz in gp_data:
-        group = dataz['group']
-        group_str = str(dataz['group'])
-        iso_class = sg_pretty("%s.%s" % tuple(group))
-        if dataz['g0_is_gt0']:
-            groups_gt0.append((iso_class, group_str, dataz['gen_vectors'], cc_display(dataz['g0_gt0_list'])))
-        elif not show_top_braid:
-            groups_0.append((iso_class, group_str, dataz['gen_vectors']))
-        else:
-            groups_0.append((iso_class, group_str, dataz['gen_vectors'], dataz['topological'], dataz['braid']))
-
-    info = {
-        'genus': genus,
-        'groups_0': groups_0,
-        'groups_gt0': groups_gt0,
-        'show_top_braid': show_top_braid,
-        'show_g0_gt0': show_g0_gt0,
-        'group_display': group_display
-    }
-
-    title = 'Families of higher genus curves with automorphisms: Genus %s group statistics' % genus
-    bread = get_bread([('Statistics', url_for('.statistics')),
-                       ('Groups per genus', url_for('.statistics')),
-                       (str(genus), ' ')])
-
-    return render_template("hgcwa-stats-groups-per-genus.html",
-                           info=info,
-                           title=title,
-                           learnmore=learnmore_list(),
-                           bread=bread)
-
-def url_for_label(label):
-    if label == "random":
-        return url_for(".random_passport")
-    return url_for(".by_label", label=label)
-
-@higher_genus_w_automorphisms_page.route("/<label>")
-def by_label(label):
-    if label_is_one_passport(label):
-        return render_passport({'passport_label': label})
-    elif label_is_one_family(label):
-        return render_family({'label': label})
-    flash_error("No family with label %s was found in the database.", label)
-    return redirect(url_for(".index"))
+def hgcwa_jump(info):
+    label = clean_input(info['jump']).strip()
+    if label_kind(label) is None:
+        flash_error("%s is not a valid label for a family, topological class, braid class or generating vector.", label)
+        return redirect(url_for(".index"))
+    return redirect(url_for_label(label))
 
 
-@higher_genus_w_automorphisms_page.route("/<passport_label>")
-def by_passport_label(label):
-    return render_passport({'passport_label': label})
+# Search parsing ############################################################
 
-cur_expr = None
-cur_index = 0
-#FIXME all these err is None should be done through raising exceptions
+@search_parser(clean_info=True)
+def parse_group(inp, query, qfield):
+    labels = parse_group_labels(inp)
+    query[qfield] = labels[0] if len(labels) == 1 else {"$in": labels}
 
-def is_letter(char):
-    return (ord(char) >= ord('a') and ord(char) <= ord('z')) or (ord(char) >= ord('A') and ord(char) <= ord('Z'))
 
-def expr_error(err):
-    expr_getc()
-    err_msg = ('-' * max(cur_index - 1, 0))
-    err_msg_lst = list(err_msg)
-    err_msg = "".join(err_msg_lst)
-    err_msg += "^ " + err
-    return err_msg
+@search_parser(clean_info=True)
+def parse_signature_box(inp, query, qfield):
+    query[qfield] = parse_signature(inp)
 
-def expr_getc():
-    global cur_index
-    while cur_index < len(cur_expr):
-        result = cur_expr[cur_index]
-        cur_index += 1
-        if result != ' ':
-            return result
+
+@search_parser(clean_info=True)
+def parse_periods_box(inp, query, qfield):
+    periods = parse_periods(inp)
+    if isinstance(query.get(qfield), list):
+        # an exact signature was also given
+        if not set(periods).issubset(query[qfield][1:]):
+            raise SearchParsingError("The signature does not contain all of the periods %s" % inp)
     else:
-        return None
-
-def expr_peekc():
-    global cur_index
-    result = expr_getc()
-    if result is not None:
-        cur_index -= 1
-    return result
-
-def expr_expect_char(char):
-    actual_char = expr_getc()
-
-    if actual_char != char:
-        return expr_error("expected '" + char + "' here")
-    else:
-        return None
-
-def read_num():
-    num = ""
-    c = expr_peekc()
-    while c is not None and c.isdigit():
-        num += c
-        expr_getc()
-        c = expr_peekc()
-    return int(num)
-
-def expect_var(vars):
-    c = expr_peekc()
-    if c in vars:
-        var = expr_getc()
-        return (None, vars[var])
-    else:
-        return (expr_error("'" + c + "' is not a recognized variable"), None)
-
-def expect_factor(vars):
-    c = expr_peekc()
-    if c is None:
-        return (expr_error("expected factor here"), None)
-    elif c.isdigit():
-        return (None, read_num())
-    elif is_letter(c):
-        err, result = expect_var(vars)
-        return err, result
-    elif c == '(':
-        expr_getc()
-        err, result = expect_expr(vars)
-        if err is not None:
-            return (err, None)
-        err = expr_expect_char(')')
-        if err is not None:
-            return (err, None)
-        else:
-            return (None, result)
-    else:
-        return (expr_error("'" + c + "' unexpected symbol"), None)
-
-def expect_term(vars):
-    err, result = expect_factor(vars)
-    if err is not None:
-        return (err, None)
-
-    c = expr_peekc()
-    while c is not None and (c.isdigit() or is_letter(c) or c == '('):
-        err, factor_result = expect_factor(vars)
-        if err is not None:
-            return (err, None)
-        result *= factor_result
-        c = expr_peekc()
-
-    return (None, result)
-
-def expect_expr(vars):
-    err, result = expect_term(vars)
-    if err is not None:
-        return (err, None)
-
-    c = expr_peekc()
-    while c == "+" or c == "-":
-        expr_getc()
-        err, term_result = expect_term(vars)
-        if err is not None:
-            return (err, None)
-        if c == "+":
-            result += term_result
-        elif c == "-":
-            result -= term_result
-        c = expr_peekc()
-
-    return (None, result)
-
-def evaluate_expr(expr, vars):
-    global cur_expr, cur_index
-    cur_expr = expr
-    cur_index = 0
-    err, result = expect_expr(vars)
-
-    if err is None:
-        if expr_peekc() is not None:
-            return (expr_error("unexpected symbol"), None)
-
-    return (err, result)
+        query[qfield] = {"$contains": periods}
 
 
-def higher_genus_w_automorphisms_jump(info):
-    labs = info['jump']
-    if label_is_one_passport(labs):
-        return render_passport({'passport_label': labs})
-    elif label_is_one_family(labs):
-        return render_family({'label': labs})
-    flash_error("The label %s is not a legitimate label for this data.", labs)
-    return redirect(url_for(".index"))
+def _int_values(inp):
+    """
+    The values of an integer search input (an integer, a range or a list), as
+    query values for a single column.
+    """
+    if not LIST_RE.match(inp):
+        raise SearchParsingError("It needs to be an integer (such as 25), a range of integers (such as 2-10 or 2..10), or a comma-separated list of these (such as 4,9,16 or 4-25, 81-121).")
+    parsed = parse_range2(inp, "x", int)
+    if parsed[0] == "$or":
+        return [D["x"] for D in parsed[1]]
+    return [parsed[1]]
 
 
-def hgcwa_code_download_search(info):
-    import time
-    lang = info.get('Submit')
-    s = Comment[lang]
-    filename = 'HigherGenusSearch' + FileSuffix[lang]
-    code = s + " " + Fullname[lang] + " CODE FOR SEARCH RESULTS" + '\n' + '\n'
-    code += s + " The results are stored in a list of records called 'data'"
-    code += "\n\n"
-    code += code_list['top_matter'][lang] + '\n' + '\n'
-    code += "data:=[];" + '\n\n'
-
-    res = list(db.hgcwa_passports.search(ast.literal_eval(info["query"])))
-    # group results by label
-    res_label = defaultdict(list)
-    for row in res:
-        res_label[row['label']].append(row)
-
-    for label, data in res_label.items():
-        code += s + " label = {}".format(label) + '\n'
-        code += s + code_list['search_result_gp_comment'][lang] + '\n'
-        code += code_list['group'][lang] + str(data[0]['group']) + ';\n'
-
-        if lang == 'magma':
-            code += code_list['group_construct'][lang] + '\n'
-
-        for k in same_for_all:
-            code += code_list[k][lang] + str(data[0][k]) + ';\n'
-
-        for k in other_same_for_all:
-            code += code_list[k][lang] + '\n'
-
-        code += '\n'
-
-        # create formatting templates to be filled in with each record in data
-        startstr = s + ' Here we add an action to data.\n'
-        stdfmt = ''
-        for k in depends_on_action:
-            stdfmt += code_list[k][lang] + '{' + k + '}' + ';\n'
-
-        if lang == 'magma':
-            stdfmt += code_list['con'][lang] + '{con}' + ';\n'
-
-        stdfmt += code_list['gen_gp'][lang] + '\n'
-        stdfmt += code_list['passport_label'][lang] + '{cc[0]}' + ';\n'
-        stdfmt += code_list['gen_vect_label'][lang] + '{cc[1]}' + ';\n'
-
-        # extended formatting template for when signH is present
-        signHfmt = stdfmt
-        signHfmt += code_list['full_auto'][lang] + '{full_auto}' + ';\n'
-        signHfmt += code_list['full_sign'][lang] + '{signH}' + ';\n'
-        signHfmt += code_list['add_to_total_full'][lang] + '\n'
-
-        # additional info for hyperelliptic cases
-        hypfmt = code_list['hyp'][lang] + code_list['tr'][lang] + ';\n'
-        hypfmt += code_list['hyp_inv'][lang]
-        hypfmt += '{hyp_involution}' + code_list['hyp_inv_last'][lang]
-        hypfmt += code_list['cyc'][lang] + code_list['fal'][lang] + ';\n'
-        hypfmt += code_list['add_to_total_hyp'][lang] + '\n'
-        cyctrigfmt = code_list['hyp'][lang] + code_list['fal'][lang] + ';\n'
-        cyctrigfmt += code_list['cyc'][lang] + code_list['tr'][lang] + ';\n'
-        cyctrigfmt += code_list['cyc_auto'][lang] + '{cinv}' + code_list['hyp_inv_last'][lang]
-        cyctrigfmt += code_list['add_to_total_cyc_trig'][lang] + '\n'
-        nhypcycstr = code_list['hyp'][lang] + code_list['fal'][lang] + ';\n'
-        nhypcycstr += code_list['cyc'][lang] + code_list['fal'][lang] + ';\n'
-        nhypcycstr += code_list['add_to_total_basic'][lang] + '\n'
-
-        start = time.time()
-        lines = [(startstr + (signHfmt if 'signH' in dataz else stdfmt).format(**dataz) + ((hypfmt.format(**dataz) if dataz['hyperelliptic'] else cyctrigfmt.format(**dataz) if dataz['cyclic_trigonal'] else nhypcycstr) if 'hyperelliptic' in dataz else '')) for dataz in data]
-        code += '\n'.join(lines)
-        code += '\n'
-
-    logger.info("%s seconds for %d chars" % (time.time() - start, len(code)))
-    strIO = BytesIO()
-    strIO.write(code.encode('utf-8'))
-    strIO.seek(0)
-    return send_file(strIO,
-                     download_name=filename,
-                     as_attachment=True)
+def _add_or(query, ors):
+    # $and avoids mixing these alternatives with other $or conditions (from group_order, say)
+    query.setdefault("$and", []).append({"$or": ors})
 
 
-#Similar to parse_ints in lmfdb/utils
-#Add searching with genus variable for group orders
+@search_parser(clean_info=True, prep_ranges=True)
+def parse_aut_order(inp, query, qfield):
+    """
+    The order of the full automorphism group: the order of G for full actions,
+    full_auto_order otherwise.
+    """
+    ors = []
+    for v in _int_values(inp):
+        ors.append({"is_full": True, "group_order": v})
+        ors.append({"full_auto_order": v})
+    _add_or(query, ors)
+
+
+@search_parser(clean_info=True)
+def parse_aut_group(inp, query, qfield):
+    """
+    The full automorphism group: G for full actions, full_auto otherwise.
+    """
+    labels = parse_group_labels(inp)
+    v = labels[0] if len(labels) == 1 else {"$in": labels}
+    _add_or(query, [{"is_full": True, "group": v}, {"full_auto": v}])
+
+
+# Similar to parse_ints in lmfdb/utils, but also allows linear expressions in the genus g
+LIST_G_RE = re.compile(r'^(\d+|(\d*-(\d+)?)|((\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\))))(,(\d+|(\d*-(\d+)?)|((\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\)))))*$')
+GENUS_RE = re.compile(r'^(\d*)\**(g((\+|\-)(\d*))*|\(g(\+|\-)(\d+)\))$')
+GROUP_ORDER_ERROR = ("It needs to be an integer (such as 25), a range of integers (such as 2-10 or 2..10), "
+                     "a linear function of the variable g for genus (such as 84(g-1), 84g-84, 84g, or g-1), "
+                     "or a comma-separated list of these (such as 4,9,16 or 4-25, 81-121).")
+
+
 def parse_range2_extend(arg, key, parse_singleton=int, parse_endpoint=None, instance=1):
     if parse_endpoint is None:
         parse_endpoint = parse_singleton
@@ -507,61 +605,42 @@ def parse_range2_extend(arg, key, parse_singleton=int, parse_endpoint=None, inst
         for a in tmp:
             if a[0] == key:
                 if len(a) == 3:
-                    ret.append({a[0]:a[1], 'genus': a[2]})
+                    ret.append({a[0]: a[1], 'genus': a[2]})
                 else:
-                    ret.append({a[0]:a[1]})
+                    ret.append({a[0]: a[1]})
             else:
                 for ai in a:
                     ret.append({ai[0]: ai[1], 'genus': ai[2]})
         return ['$or', ret]
-    elif 'g' in arg: # linear function of variable g (ax+b)
+    elif 'g' in arg:  # linear function of variable g (ax+b)
         if GENUS_RE.match(arg):
             a = GENUS_RE.match(arg).groups()[0]
-            genus_list = sorted(db.hgcwa_passports.distinct('genus'))
-            min_genus = genus_list[0]
-            max_genus = genus_list[-1]
+            genus_list = sorted(db.hgcwa_families.distinct('genus'))
             queries = []
-
-            for g in range(min_genus,max_genus+1):
+            for g in range(genus_list[0], genus_list[-1] + 1):
                 if '(' in arg:
                     b = int(GENUS_RE.match(arg).groups()[6])
-                    if '+' in arg: #a(g+b)
-                        group_order = int(a)*(g+b)
-                    elif '-' in arg: #a(g-b)
-                        group_order = int(a)*(g-b)
+                    if '+' in arg:  # a(g+b)
+                        group_order = int(a) * (g + b)
+                    else:  # a(g-b)
+                        group_order = int(a) * (g - b)
                 else:
                     if '+' in arg:
                         b = int(GENUS_RE.match(arg).groups()[4])
-                        if a == '': #g+b
-                            group_order = g+b
-                        else: #ag+b
-                            group_order = int(a)*g+b
+                        group_order = g + b if a == '' else int(a) * g + b
                     elif '-' in arg:
                         b = int(GENUS_RE.match(arg).groups()[4])
-                        if a == '': #g-b
-                            group_order = g-b
-                        else: #ag-b
-                            group_order = int(a)*g-b
-                    elif a == '':
-                        group_order = g
-                    else:  # ag
-                        group_order = int(a)*g
-
+                        group_order = g - b if a == '' else int(a) * g - b
+                    else:
+                        group_order = g if a == '' else int(a) * g
                 queries.append((group_order, g))
-
             if instance == 1:  # If there is only one linear function
                 return ['$or', [{key: gp_ord, 'genus': g} for gp_ord, g in queries]]
             else:
                 return [[key, gp_ord, g] for gp_ord, g in queries]  # Nested list
-
         else:
-            raise ValueError("It needs to be an integer (such as 25), \
-                    a range of integers (such as 2-10 or 2..10), \
-                    a linear function of variable g for genus \
-                    (such as 84(g-1), 84g-84, 84g, or g-1), \
-                    or a comma-separated list of these (such as 4,9,16 or 4-25, 81-121).")
-
-    elif '-' in arg and 'g' not in arg:
+            raise ValueError(GROUP_ORDER_ERROR)
+    elif '-' in arg:
         ix = arg.index('-', 1)
         start, end = arg[:ix], arg[ix + 1:]
         q = {}
@@ -576,513 +655,579 @@ def parse_range2_extend(arg, key, parse_singleton=int, parse_endpoint=None, inst
 
 @search_parser(clean_info=True, prep_ranges=True)
 def parse_group_order(inp, query, qfield, parse_singleton=int):
-    if LIST_RE.match(inp):
+    if LIST_G_RE.match(inp):
         collapse_ors(parse_range2_extend(inp, qfield, parse_singleton), query)
     else:
-        raise ValueError("It needs to be an integer (such as 25), \
-                    a range of integers (such as 2-10 or 2..10), \
-                    a linear function of variable g for genus (such as 84(g-1), 84g-84, 84g, or g-1), \
-                    or a comma-separated list of these (such as 4,9,16 or 4-25, 81-121).")
+        raise ValueError(GROUP_ORDER_ERROR)
 
-def display_gen_vecs(vecs):
-    def display_perm(perm):
-        if perm.size() <= 20:
-            return perm.cycle_string()
 
-        def display_cycle(c):
-            if len(c) > 20:
-                ldots = r",\ldots"
-                c = c[:10]
-            else:
-                ldots = ""
-            return fr"({','.join(str(x) for x in c)}{ldots})"
-        tups = [cyc for cyc in perm.cycle_tuples() if len(cyc) > 1]
-        cdots = r"\cdots" if len(tups) > 2 else ""
-        if len(tups) == 0:
-            return "()"
-        elif len(tups) == 1:
-            return display_cycle(tups[0])
-        else:
-            return f"{display_cycle(tups[0])}{cdots}{display_cycle(tups[-1])}"
-    dots = r",\ldots" if len(vecs) > 1 else ""
-    return display_perm(Permutation(vecs[0])) + dots
+def common_parse(info, query):
+    """
+    The inputs that are columns of both hgcwa_families and hgcwa_topological.
+    """
+    parse_ints(info, query, 'genus', name='Genus')
+    parse_ints(info, query, 'dim', name='Dimension')
+    parse_ints(info, query, 'r', name='Number of branch points')
+    parse_group(info, query, 'group', name='Group')
+    parse_group_order(info, query, 'group_order', name='Group order')
+    parse_signature_box(info, query, 'signature', name='Signature')
+    parse_periods_box(info, query, 'periods', qfield='signature', name='Periods')
+    parse_ints(info, query, 'num_braid', name='Braid classes')
+    parse_ints(info, query, 'num_vectors', name='Generating vectors')
 
-hgcwa_columns = SearchColumns([
-    LinkCol("passport_label", "dq.curve.highergenus.aut.label", "Refined passport label",
-            lambda label: f"/HigherGenus/C/Aut/{label}"),
-    MathCol("genus", "ag.curve.genus", "Genus"),
-    MathCol("g0", "curve.highergenus.aut.quotientgenus", "Quotient genus", default=False),
-    ProcessedCol("group", "group.small_group_label", "Group", group_display, mathmode=True, align="center"),
-    MathCol("group_order", "group.order", "Group order"),
-    MathCol("dim", "curve.highergenus.aut.dimension", "Dimension"),
-    ProcessedCol("signature", "curve.highergenus.aut.signature", "Signature", lambda sig: sign_display(ast.literal_eval(sig)), mathmode=True),
-    CheckCol("hyperelliptic", "ag.hyperelliptic_curve", "Hyperelliptic", unknown="", default=False),
-    CheckCol("cyclic_trigonal", "ag.cyclic_trigonal", "Cyclic trigonal", unknown="", default=False),
-    ProcessedCol("gen_vectors", "curve.highergenus.aut.generatingvector", "Generating vectors", display_gen_vecs, mathmode=True, default=False)])
-hgcwa_columns.languages = ['gap', 'magma']
 
-class HGCWADownloader(Downloader):
-    table = db.hgcwa_passports
-    title = "Higher genus curve"
-    short_name = "refined passport"
-    var_name = "passports"
-    inclusions = {
-        "gens": (
-            ["gen_vectors"],
-            {
-                "magma": "n := #out`gen_vectors[1];\n    S := SymmetricGroup(n);\n    gens := [S!genvec : genvec in out`gen_vectors];",
-                "gap": "gens:= List([1..Length(out.gen_vectors)], x->PermList(out.gen_vectors[x]));"
-            }
-        ),
-        "G": (
-            ["gen_vectors"],
-            {
-                "magma": "G := PermutationGroup<n| gens>;",
-                "gap": "G:=Subgroup(SymmetricGroup(Length(out.gen_vectors[1])), gens);"
-            }
-        ),
-    }
+# Inputs that only make sense for topological classes
+TOPOLOGICAL_ONLY = [("aut_order", "Order of Aut"), ("aut_group", "Aut group"),
+                    ("full_index", "[Aut:G]"), ("hyperelliptic", "Hyperelliptic"),
+                    ("cyclic_trigonal", "Cyclic trigonal"), ("jac_dim", "Jacobian factor dimension")]
 
-@search_wrap(
-    table=db.hgcwa_passports,
-    title='Family of higher genus curves with automorphisms search results',
-    err_title='Family of higher genus curves with automorphisms search input error',
-    columns=hgcwa_columns,
+hgcwa_search_kwds = dict(
     per_page=50,
     url_for_label=url_for_label,
-    random_projection="passport_label",
-    shortcuts={'jump': higher_genus_w_automorphisms_jump,
-               'download': HGCWADownloader() },
+    postprocess=tex_cache_postprocess,
     bread=lambda: get_bread("Search results"),
     learnmore=learnmore_list)
+
+
+@search_wrap(
+    table=db.hgcwa_topological,
+    title='Higher genus curve action search results',
+    err_title='Higher genus curve action search input error',
+    columns=hgcwa_columns,
+    shortcuts={'jump': hgcwa_jump, 'download': HGCWA_download()},
+    **hgcwa_search_kwds)
 def higher_genus_w_automorphisms_search(info, query):
-    if info.get('signature'):
-        # allow for ; in signature
-        info['signature'] = info['signature'].replace(';',',')
-        parse_bracketed_posints(info,query,'signature',split=False,name='Signature',keepbrackets=True, allow0=True)
-        if query.get('signature'):
-            query['signature'] = info['signature'] = str(sort_sign(ast.literal_eval(query['signature']))).replace(' ','')
-    parse_gap_id(info,query,'group',qfield='group')
-    parse_ints(info,query,'g0')
-    parse_ints(info,query,'genus')
-    parse_ints(info,query,'dim')
-    parse_group_order(info,query,'group_order')
-
-    if 'inc_hyper' in info:
-        if info['inc_hyper'] == 'exclude':
-            query['hyperelliptic'] = False
-        elif info['inc_hyper'] == 'only':
-            query['hyperelliptic'] = True
-    if 'inc_cyc_trig' in info:
-        if info['inc_cyc_trig'] == 'exclude':
-            query['cyclic_trigonal'] = False
-        elif info['inc_cyc_trig'] == 'only':
-            query['cyclic_trigonal'] = True
-    if 'inc_full' in info:
-        if info['inc_full'] == 'exclude':
-            query['full_auto'] = {'$exists': True}
-        elif info['inc_full'] == 'only':
-            query['full_auto'] = {'$exists': False}
-    query['cc.1'] = 1
-
-    info['group_display'] = group_display
-    info['sign_display'] = sign_display
+    common_parse(info, query)
+    parse_bool(info, query, 'is_full', name='Full automorphism group')
+    parse_ints(info, query, 'full_index', name='[Aut:G]')
+    parse_aut_order(info, query, 'aut_order', name='Order of Aut')
+    parse_aut_group(info, query, 'aut_group', name='Aut group')
+    parse_bool(info, query, 'hyperelliptic', name='Hyperelliptic')
+    parse_bool(info, query, 'cyclic_trigonal', name='Cyclic trigonal')
+    parse_element_of(info, query, 'jac_dim', qfield='jacobian_factor_dims', split_interval=200,
+                     name='Jacobian factor dimension')
 
 
-def render_family(args):
-    info = {}
-    if 'label' in args:
-        label = clean_input(args['label'])
-        dataz = list(db.hgcwa_passports.search({'label':label}))
-        if not dataz:
-            flash_error("No family with label %s was found in the database.", label)
-            return redirect(url_for(".index"))
-        data = dataz[0]
-        g = data['genus']
-        g0 = data['g0']
-        GG = ast.literal_eval(data['group'])
-        gn = GG[0]
-        gt = GG[1]
+@search_wrap(
+    table=db.hgcwa_families,
+    title='Higher genus curve family search results',
+    err_title='Higher genus curve family search input error',
+    columns=family_columns,
+    shortcuts={'jump': hgcwa_jump, 'download': HGCWA_family_download()},
+    **hgcwa_search_kwds)
+def hgcwa_family_search(info, query):
+    bad = [name for field, name in TOPOLOGICAL_ONLY if info.get(field)]
+    if bad:
+        msg = "%s can only be searched for topological classes; use the list of topological classes." % ", ".join(bad)
+        flash_error(msg)
+        raise SearchParsingError(msg)
+    common_parse(info, query)
+    # For a family: whether some (yes) or no (no) topological class has G as its full automorphism group
+    parse_bool(info, query, 'is_full', qfield='num_topological_full', name='Full automorphism group',
+               process=lambda b: {"$gt": 0} if b else 0)
 
-        gp_string = str(gn) + '.' + str(gt)
-        pretty_group = sg_pretty(gp_string)
 
-        if gp_string == pretty_group:
-            spname = False
+class HGCWASearchArray(SearchArray):
+    noun = "topological class"
+    plural_noun = "topological classes"
+    jump_example = "4.5-1.0.5-5-5-5.2"
+    jump_egspan = "e.g. 2.10-2.0.2-5-10 (a family), 4.5-1.0.5-5-5-5.2 (a topological class) or 21.32-47.0.2-2-4-4-4.1.17 (a braid class)"
+    jump_knowl = "curve.highergenus.aut.search_input"
+    jump_prompt = "Label"
+    label_knowl = "dq.curve.highergenus.aut.label"
+    has_diagram = False
+    null_column_explanations = {
+        # null when G is not the full automorphism group: the data belongs to the full action
+        'hyperelliptic': "hyperelliptic (recorded only when $G$ is the full automorphism group)",
+        'cyclic_trigonal': "cyclic trigonal (recorded only when $G$ is the full automorphism group)",
+        'full_auto': False,
+        'full_auto_order': False,
+    }
+    sort_knowl = "curve.highergenus.aut.sort_order"
+    _top_sorts = [
+        ("", "genus", ['genus', 'group_order', 'group_counter', 'signature', 'top_index']),
+        ("group_order", "group order", ['group_order', 'group_counter', 'genus', 'signature', 'top_index']),
+        ("dim", "dimension", ['dim', 'genus', 'group_order', 'group_counter', 'signature', 'top_index']),
+        ("full_index", "index [Aut:G]", ['full_index', 'genus', 'group_order', 'group_counter', 'signature', 'top_index']),
+        ("num_braid", "braid classes", ['num_braid', 'genus', 'group_order', 'group_counter', 'signature', 'top_index']),
+        ("num_vectors", "generating vectors", ['num_vectors', 'genus', 'group_order', 'group_counter', 'signature', 'top_index'])]
+    _family_sorts = [
+        ("", "genus", ['genus', 'group_order', 'group_counter', 'signature']),
+        ("group_order", "group order", ['group_order', 'group_counter', 'genus', 'signature']),
+        ("dim", "dimension", ['dim', 'genus', 'group_order', 'group_counter', 'signature']),
+        ("num_topological", "topological classes", ['num_topological', 'genus', 'group_order', 'group_counter', 'signature']),
+        ("num_vectors", "generating vectors", ['num_vectors', 'genus', 'group_order', 'group_counter', 'signature'])]
+    sorts = {"": _top_sorts, "Random": _top_sorts,
+             "Families": _family_sorts, "RandomFamily": _family_sorts}
+
+    def __init__(self):
+        genus = TextBox(
+            name="genus",
+            label="Genus",
+            knowl="ag.curve.genus",
+            example="3",
+            example_span="4, or a range like 3..5")
+        dim = TextBox(
+            name="dim",
+            label="Dimension",
+            knowl="curve.highergenus.aut.dimension",
+            example="1",
+            example_span="1, or a range like 0..2")
+        group = TextBox(
+            name="group",
+            label="Group",
+            knowl="group.label",
+            example="4.2",
+            example_span="an LMFDB label, such as 4.2 or 32.47")
+        group_order = TextBox(
+            name="group_order",
+            label="Group order",
+            knowl="group.order",
+            example="2..5",
+            example_span="12, or a range like 10..20, or you may include the variable g for genus like 84(g-1)")
+        signature = TextBox(
+            name="signature",
+            label="Signature",
+            knowl="curve.highergenus.aut.signature",
+            example="[0,2,3,7]",
+            example_span="[0,2,3,7] or [0;2,3,7]")
+        periods = TextBox(
+            name="periods",
+            label="Periods",
+            knowl="curve.highergenus.aut.signature",
+            example="5",
+            example_span="5, or 2,4 for signatures containing all of them")
+        r = TextBox(
+            name="r",
+            label="Branch points",
+            knowl="curve.highergenus.aut.branchpoints",
+            example="4",
+            example_span="4, or a range like 4..6")
+        is_full = YesNoBox(
+            name="is_full",
+            label="Full",
+            knowl="curve.highergenus.aut.full")
+        aut_order = TextBox(
+            name="aut_order",
+            label="Order of Aut",
+            knowl="curve.highergenus.aut.full",
+            example="48",
+            example_span="48, or a range like 20..50")
+        aut_group = TextBox(
+            name="aut_group",
+            label="Aut group",
+            knowl="curve.highergenus.aut.full",
+            example="48.29",
+            example_span="an LMFDB label, such as 48.29")
+        full_index = TextBox(
+            name="full_index",
+            label=r"Index $[\mathrm{Aut}:G]$",
+            knowl="curve.highergenus.aut.full_index",
+            example="2",
+            example_span="1 for full actions, or a range like 2..")
+        hyperelliptic = YesNoBox(
+            name="hyperelliptic",
+            label="Hyperelliptic",
+            knowl="ag.hyperelliptic_curve")
+        cyclic_trigonal = YesNoBox(
+            name="cyclic_trigonal",
+            label="Cyclic trigonal",
+            knowl="ag.cyclic_trigonal")
+        jac_dim = TextBox(
+            name="jac_dim",
+            label="Jacobian factor dim.",
+            knowl="curve.highergenus.aut.groupalgebradecomp",
+            example="1",
+            example_span="1 (an elliptic factor), or a range like 1..2")
+        num_braid = TextBox(
+            name="num_braid",
+            label="Braid classes",
+            knowl="curve.highergenus.aut.braid_equivalence",
+            example="2..",
+            example_span="1, or a range like 2..10")
+        num_vectors = TextBox(
+            name="num_vectors",
+            label="Generating vectors",
+            knowl="curve.highergenus.aut.generatingvector",
+            example="100..",
+            example_span="1, or a range like 100..")
+        count = CountBox()
+
+        self.browse_array = [
+            [genus, dim],
+            [group, group_order],
+            [signature, periods],
+            [r, is_full],
+            [aut_order, full_index],
+            [aut_group, hyperelliptic],
+            [jac_dim, cyclic_trigonal],
+            [num_braid, num_vectors],
+            [count]]
+
+        self.refine_array = [
+            [genus, dim, group, group_order, signature],
+            [periods, r, num_braid, num_vectors, jac_dim],
+            [is_full, aut_order, aut_group, full_index],
+            [hyperelliptic, cyclic_trigonal]]
+
+        self.family_refine_array = [
+            [genus, dim, group, group_order],
+            [signature, periods, r, is_full],
+            [num_braid, num_vectors]]
+
+    def main_array(self, info):
+        if info is None:
+            return self.browse_array
+        if self._st(info) in ["Families", "RandomFamily"]:
+            array = self.family_refine_array
         else:
-            spname = True
-        title = 'Family of genus ' + str(g) + ' curves with automorphism group $' + pretty_group + '$'
-        smallgroup = "[" + str(gn) + "," + str(gt) + "]"
+            array = self.refine_array
+        return array + [[SneakyTextBox(name="labels", label="Labels", knowl=self.label_knowl)]]
 
-        prop2 = [
-            ('Label', label),
-            ('Genus', r'\(%d\)' % g),
-            ('Quotient genus', r'\(%d\)' % g0),
-            ('Group', r'\(%s\)' % pretty_group),
-            ('Signature', r'\(%s\)' % sign_display(ast.literal_eval(data['signature'])))
-        ]
-        info.update({'genus': data['genus'],
-                    'sign': sign_display(ast.literal_eval(data['signature'])),
-                     'group': pretty_group,
-                    'g0': data['g0'],
-                    'dim': data['dim'],
-                    'r': data['r'],
-                    'gpid': smallgroup,
-                    'numb': len(dataz)
-                   })
+    def search_types(self, info):
+        return self._search_again(info, [
+            ('List', 'List of topological classes'),
+            ('Families', 'List of families'),
+            ('Random', 'Random topological class'),
+            ('RandomFamily', 'Random family')])
 
-        if spname:
-            info.update({'specialname': True})
 
-        Lcc = []
-        Lall = []
-        Ltopo_rep = [] #List of topological representatives
-        for dat in dataz:
-            if ast.literal_eval(dat['con']) not in Lcc:
-                urlstrng = dat['passport_label']
-                Lcc.append(ast.literal_eval(dat['con']))
-                Lall.append([cc_display(ast.literal_eval(dat['con'])),dat['passport_label'],
-                             urlstrng,dat['cc']])
+# Object pages ##############################################################
 
-            #Topological equivalence
-            if 'topological' in dat:
-                if dat['topological'] == dat['cc']:
-                    x1 = [] #A list of permutations of generating vectors of topo_rep
-                    for perm in dat['gen_vectors']:
-                        x1.append(sep.join(split_perm(Permutation(perm).cycle_string())))
-                    Ltopo_rep.append([dat['total_label'],
-                                      x1,
-                                      dat['label'],
-                                      'T.' + '.'.join(str(x) for x in dat['cc']),
-                                      dat['cc']]) #2nd to last element is used for webpage tag
+@higher_genus_w_automorphisms_page.route("/<label>")
+def by_label(label):
+    clean_label = clean_input(label)
+    if clean_label != label:
+        return redirect(url_for(".by_label", label=clean_label), 301)
+    kind = label_kind(label)
+    if kind == "family":
+        return render_family_page(label)
+    if kind == "topological":
+        return render_topological_page(label)
+    if kind == "braid":
+        # Braid classes are rows of the topological class page
+        rec = db.hgcwa_braid.lookup(label, ["topological", "braid_index"])
+        if rec is not None:
+            return redirect(braid_row_url(rec["topological"], label, rec["braid_index"]))
+        flash_error("No braid class with label %s was found in the database.", label)
+        return redirect(url_for(".index"))
+    if kind == "vector":
+        rec = db.hgcwa_vectors.lookup(label, ["braid", "topological"])
+        if rec is not None:
+            braid = db.hgcwa_braid.lookup(rec["braid"], ["num_vectors", "braid_index"])
+            if braid["num_vectors"] == 1:
+                return redirect(braid_row_url(rec["topological"], rec["braid"], braid["braid_index"]))
+            v = split_label(label)[1][-1]
+            start = ((v - 1) // VECTORS_PER_PAGE) * VECTORS_PER_PAGE
+            return redirect(url_for(".vector_listing", label=rec["braid"], start=start) + "#" + label)
+        flash_error("No generating vector with label %s was found in the database.", label)
+        return redirect(url_for(".index"))
+    flash_error("No family with label %s was found in the database.", label)
+    return redirect(url_for(".index"))
 
-        #Add topological equivalence to info
-        info.update({'topological_rep': Ltopo_rep})
-        info.update({'topological_num': len(Ltopo_rep)})
 
-        info.update({'passport': Lall})
-        info.update({'passport_num': len(Lall)})
+def braid_row_url(topological, braid, braid_index):
+    if braid_index > BRAID_ROWS_SHOWN:
+        return url_for(".by_label", label=topological, braids="all") + "#" + braid
+    return url_for(".by_label", label=topological) + "#" + braid
 
-        g2List = ['[2,1]', '[4,2]', '[8,3]', '[10,2]', '[12,4]', '[24,8]', '[48,29]']
-        if g == 2 and data['group'] in g2List:
-            g2url = "/Genus2Curve/Q/?geom_aut_grp_label=" + ".".join(data['group'][1:-1].split(','))
-            friends = [(r"Genus 2 curves over $\Q$", g2url)]
+
+class FamilyTopologicalArray(EmbeddedSearchArray):
+    sorts = [("", "class number", ['top_index']),
+             ("is_full", "full", [('is_full', -1), 'top_index']),
+             ("full_index", "index [Aut:G]", ['full_index', 'top_index']),
+             ("num_braid", "braid classes", ['num_braid', 'top_index']),
+             ("num_vectors", "generating vectors", ['num_vectors', 'top_index'])]
+
+    def __init__(self, show_filter=False):
+        if show_filter:
+            self.refine_array = [[YesNoBox(name="is_full", label="Full", knowl="curve.highergenus.aut.full")]]
         else:
-            friends = []
+            self.refine_array = []
 
-        br_g, br_gp, br_sign = split_family_label(label)
 
-        bread_sign = label_to_breadcrumbs(br_sign)
-        bread_gp = label_to_breadcrumbs(br_gp)
+def render_family_page(label):
+    fam = db.hgcwa_families.lookup(label)
+    if fam is None:
+        flash_error("No family with label %s was found in the database.", label)
+        return redirect(url_for(".index"))
+    # The filter is useful for families with many topological classes, full and not full
+    show_filter = fam["num_topological"] > 15 and 0 < fam["num_topological_full"] < fam["num_topological"]
+    info = to_dict(request.args, search_array=FamilyTopologicalArray(show_filter))
+    if info.get("download"):
+        info["columns"] = family_top_columns
+        return HGCWA_download()(info)
+    cache = group_cache([fam["group"]])
+    tex = group_tex(fam["group"], cache)
+    gname = "$%s$" % tex if tex else fam["group"]
+    sig = signature_display(fam["signature"])
+    info["family"] = fam
+    info["group_link"] = group_link(fam["group"], cache)
+    info["signature_display"] = sig
+    info["title"] = "Family %s of genus %s curves with automorphism group %s" % (label, fam["genus"], gname)
+    info["titletag"] = "Family %s of genus %s curves with automorphism group %s" % (label, fam["genus"], fam["group"])
+    info["bread"] = family_bread(label, tex)
+    info["properties"] = [
+        ('Label', label),
+        ('Genus', r'\(%s\)' % fam["genus"]),
+        ('Group', gname),
+        ('Signature', r'\(%s\)' % sig),
+        ('Dimension', r'\(%s\)' % fam["dim"]),
+        ('Topological classes', r'\(%s\)' % comma(fam["num_topological"])),
+        ('Braid classes', r'\(%s\)' % comma(fam["num_braid"])),
+        ('Generating vectors', r'\(%s\)' % comma(fam["num_vectors"]))]
+    friends = [("Group %s" % gname, url_for("abstract.by_label", label=fam["group"]))]
+    if fam["genus"] == 2 and fam["group"] in G2_AUT_GROUPS:
+        friends.append((r"Genus 2 curves over $\Q$", url_for("g2c.index_Q", geom_aut_grp_label=fam["group"])))
+    info["friends"] = friends
+    info["downloads"] = vector_downloads(label)
+    info["KNOWL_ID"] = "curve.highergenus.aut.%s" % label
+    return render_family(info)
 
-        bread = get_bread([(br_g, './?genus='+br_g),
-                           ('$'+pretty_group+'$',
-                            './?genus='+br_g + '&group='+bread_gp),
-                           (bread_sign,' ')])
 
-        if len(Ltopo_rep) == 0 or len(dataz) == 1:
-            downloads = [
-                ('Code to GAP', url_for(".hgcwa_code_download", label=label, download_type='gap')),
-                ('Code to Magma', url_for(".hgcwa_code_download", label=label, download_type='magma')),
-            ]
-        else:
-            downloads = [
-                ('Code to GAP', None),
-                ('\u2003 All vectors', url_for(".hgcwa_code_download", label=label, download_type='gap')),
-                ('\u2003 Up to topological equivalence', url_for(".hgcwa_code_download", label=label, download_type='topo_gap')),
-                ('Code to Magma', None),
-                ('\u2003 All vectors', url_for(".hgcwa_code_download", label=label, download_type='magma')),
-                ('\u2003 Up to topological equivalence', url_for(".hgcwa_code_download", label=label, download_type='topo_magma')),
-            ]
-        downloads.append(('Underlying data', url_for(".hgcwa_data", label=label)))
-        return render_template("hgcwa-show-family.html",
-                               title=title, bread=bread, info=info,
-                               properties=prop2, friends=friends,
-                               KNOWL_ID="curve.highergenus.aut.%s" % label,
-                               learnmore=learnmore_list(), downloads=downloads)
+@embed_wrap(
+    table=db.hgcwa_topological,
+    template="hgcwa-family.html",
+    err_title="Higher genus curve family error",
+    columns=family_top_columns,
+    postprocess=family_top_postprocess,
+    learnmore=learnmore_list,
+    # Each of the following arguments is set here so that it is overridden when constructing template_kwds,
+    # which prioritizes values found in info (which are set in render_family_page() before calling render_family)
+    bread=lambda: None,
+    properties=lambda: None,
+    friends=lambda: None,
+    downloads=lambda: None,
+    KNOWL_ID=lambda: None,
+    titletag=lambda: None,
+)
+def render_family(info, query):
+    query["family"] = info["family"]["label"]
+    parse_bool(info, query, "is_full", name="Full")
+
+
+def render_topological_page(label):
+    data = db.hgcwa_topological.lookup(label)
+    if data is None:
+        flash_error("No topological class with label %s was found in the database.", label)
+        return redirect(url_for(".index"))
+    family = data["family"]
+    G = data["group"]
+    sig = data["signature"]
+    fam = db.hgcwa_families.lookup(family, ["num_topological"])
+    num_top = fam["num_topological"] if fam else None
+    cache = group_cache([G, data.get("full_auto")], extra=["representations"])
+    d, gens = perm_rep(cache.get(G))
+    tex = group_tex(G, cache)
+    gname = "$%s$" % tex if tex else G
+
+    # Braid classes and their representative vectors
+    show_all = request.args.get("braids") == "all"
+    limit = BRAID_ROWS_MAX if show_all else BRAID_ROWS_SHOWN
+    braids = list(db.hgcwa_braid.search(
+        {"topological": label}, ["label", "braid_index", "num_vectors", "rep_vector", "jacobian_decomp"],
+        sort=["braid_index"], limit=limit))
+    if data["num_braid"] <= len(braids):
+        char_lists = []
+        for rec in braids:
+            if rec["jacobian_decomp"] not in char_lists:
+                char_lists.append(rec["jacobian_decomp"])
+    else:
+        char_lists = db.hgcwa_braid.distinct("jacobian_decomp", {"topological": label})
+    same_chars = len(char_lists) == 1
+    rep_labels = [rec["rep_vector"] for rec in braids] + [data["rep_vector"]]
+    vecs = {rec["label"]: rec for rec in db.hgcwa_vectors.search({"label": {"$in": rep_labels}}, ["label", "con", "gen_vectors"])}
+
+    def entries(vec):
+        return [(cl, entry_data(code, d)) for cl, code in zip(vec["con"], vec["gen_vectors"])]
+
+    braid_rows = []
+    for rec in braids:
+        row = {"label": rec["label"], "num_vectors": rec["num_vectors"], "group": G,
+               "chars": [c[2] for c in (rec["jacobian_decomp"] or [])]}
+        vec = vecs.get(rec["rep_vector"])
+        if vec is not None:
+            for i, entry in enumerate(entries(vec)):
+                row["c%s" % (i + 1)] = entry
+        braid_rows.append(row)
+
+    info = {"label": label, "data": data, "group": G, "degree": d, "show_all": show_all,
+            "num_top": num_top, "same_chars": same_chars}
+    info["group_link"] = group_link(G, cache)
+    info["signature_display"] = signature_display(sig)
+    info["perm_gens"] = ", ".join(perm_display(g) for g in gens)
+    info["braid_table"] = {"columns": braid_table_columns(sig, not same_chars), "results": braid_rows}
+    info["braid_rows_shown"] = BRAID_ROWS_SHOWN
+    info["hyp_involution_display"] = cc_knowl(G, data.get("hyp_involution"))
+    info["cinv_display"] = cc_knowl(G, data.get("cinv"))
+
+    # The representative generating vector, one entry per row
+    rep = vecs.get(data["rep_vector"])
+    if rep is not None:
+        info["rep_table"] = {"columns": rep_vector_columns,
+                             "results": [{"entry": "c_{%s}" % (i + 1), "perm": perm, "cl": cl, "group": G, "order": m}
+                                         for i, ((cl, perm), m) in enumerate(zip(entries(rep), sig[1:]))]}
+
+    # The distinct tuples of conjugacy classes
+    if data["num_vectors"] <= CLASS_TUPLE_MAX_VECTORS:
+        tuples = class_tuple_summary(db.hgcwa_vectors.search({"topological": label}, ["braid", "con"]))
+        for rec in tuples:
+            rec["group"] = G
+        info["tuple_table"] = {"columns": class_tuple_columns, "results": tuples}
+
+    # The Jacobian
+    if data.get("jacobian_dims"):
+        info["jacobian"] = jacobian_tex(data["jacobian_dims"])
+        if same_chars and char_lists[0]:
+            info["jacobian_table"] = {"columns": jacobian_columns,
+                                      "results": [{"dim": c[0], "mult": c[1], "char": c[2], "group": G}
+                                                  for c in char_lists[0]]}
+
+    # The full automorphism group
+    if not data["is_full"]:
+        info["full_auto_display"] = (group_link(data["full_auto"], cache) if data.get("full_auto")
+                                     else "a group of order $%s$, not in the LMFDB" % data["full_auto_order"])
+        if data.get("signH"):
+            info["signH_display"] = signature_display(data["signH"])
+        if data.get("full_gen_vector"):
+            info["full_gen_vector"] = [cycle_string(p) for p in data["full_gen_vector"]]
+            info["full_gen_degree"] = len(data["full_gen_vector"][0])
+
+    # Previous and next topological class in the family
+    T = data["top_index"]
+    if T > 1:
+        info["prev"] = "%s.%s" % (family, T - 1)
+    if num_top is not None and T < num_top:
+        info["next"] = "%s.%s" % (family, T + 1)
+
+    if data["is_full"]:
+        full_prop = "yes"
+    elif data.get("full_auto"):
+        ftex = group_tex(data["full_auto"], cache)
+        full_prop = "no: $%s$" % ftex if ftex else "no: %s" % data["full_auto"]
+    else:
+        full_prop = r"no: order \(%s\)" % data["full_auto_order"]
+    properties = [
+        ('Label', label),
+        ('Genus', r'\(%s\)' % data["genus"]),
+        ('Group', gname),
+        ('Signature', r'\(%s\)' % info["signature_display"]),
+        ('Dimension', r'\(%s\)' % data["dim"]),
+        ('Full', full_prop)]
+    if data["is_full"] and data.get("hyperelliptic") is not None:
+        properties.append(('Hyperelliptic', "yes" if data["hyperelliptic"] else "no"))
+    properties += [
+        ('Braid classes', r'\(%s\)' % comma(data["num_braid"])),
+        ('Generating vectors', r'\(%s\)' % comma(data["num_vectors"]))]
+
+    friends = [("Family %s" % family, url_for(".by_label", label=family)),
+               ("Group %s" % gname, url_for("abstract.by_label", label=G)),
+               ("Rational character table of %s" % gname, url_for("abstract.Qchar_table", label=G))]
+    if not data["is_full"]:
+        if data.get("full_label"):
+            friends.append(("Family of the full action %s" % data["full_label"],
+                            url_for(".by_label", label=data["full_label"])))
+        if data.get("full_auto"):
+            friends.append(("Full automorphism group %s" % data["full_auto"],
+                            url_for("abstract.by_label", label=data["full_auto"])))
+    elif data["genus"] == 2 and G in G2_AUT_GROUPS:
+        friends.append((r"Genus 2 curves over $\Q$", url_for("g2c.index_Q", geom_aut_grp_label=G)))
+
+    return render_template("hgcwa-topological.html",
+                           title="Topological class %s" % label,
+                           bread=family_bread(family, tex, [(str(T), " ")]),
+                           info=info,
+                           properties=properties,
+                           friends=friends,
+                           downloads=vector_downloads(label),
+                           learnmore=learnmore_list(),
+                           KNOWL_ID="curve.highergenus.aut.%s" % label)
+
+
+@higher_genus_w_automorphisms_page.route("/<label>/vectors")
+def vector_listing(label):
+    """
+    All generating vectors of a topological class or a braid class, one page at a time.
+    Vectors are numbered within their braid class, so the labels of a page are
+    determined by the braid classes, and they are sorted numerically here.
+    """
+    kind = label_kind(label)
+    if kind not in ["topological", "braid"]:
+        flash_error("%s is not the label of a topological class or a braid class.", label)
+        return redirect(url_for(".index"))
+    bquery = {"topological": label} if kind == "topological" else {"label": label}
+    braids = list(db.hgcwa_braid.search(bquery, ["label", "num_vectors"], sort=["braid_index"]))
+    if not braids:
+        flash_error("No %s with label %s was found in the database.",
+                    "braid class" if kind == "braid" else "topological class", label)
+        return redirect(url_for(".index"))
+    topological = label if kind == "topological" else parent_label(label)
+    family = split_label(label)[0]
+    data = db.hgcwa_topological.lookup(topological, ["group", "signature"])
+    G = data["group"]
+    cache = group_cache([G], extra=["representations"])
+    d, _ = perm_rep(cache.get(G))
+    labels = vector_labels(braids)
+    try:
+        start = max(0, int(request.args.get("start", 0)))
+        count = min(1000, max(1, int(request.args.get("count", VECTORS_PER_PAGE))))
+    except ValueError:
+        start, count = 0, VECTORS_PER_PAGE
+    page = labels[start:start + count]
+    vecs = sorted(db.hgcwa_vectors.search({"label": {"$in": page}}, ["label", "braid", "con", "gen_vectors"]),
+                  key=lambda rec: label_sort_key(rec["label"]))
+    rows = []
+    for vec in vecs:
+        row = {"label": vec["label"], "braid": vec["braid"], "group": G}
+        for i, (cl, code) in enumerate(zip(vec["con"], vec["gen_vectors"])):
+            row["c%s" % (i + 1)] = (cl, entry_data(code, d))
+        rows.append(row)
+    info = {"label": label, "kind": kind, "topological": topological, "group": G, "degree": d,
+            "number": len(labels), "start": start, "count": count,
+            "upper": min(len(labels), start + count),
+            "vector_table": {"columns": vector_table_columns(data["signature"], kind == "topological"), "results": rows}}
+    if start > 0:
+        info["prev_url"] = url_for(".vector_listing", label=label, start=max(0, start - count), count=count)
+    if start + count < len(labels):
+        info["next_url"] = url_for(".vector_listing", label=label, start=start + count, count=count)
+    tex = group_tex(G, cache)
+    tail = [(str(split_label(topological)[1][0]), url_for(".by_label", label=topological))]
+    if kind == "braid":
+        tail.append((str(split_label(label)[1][1]), braid_row_url(topological, label, split_label(label)[1][1])))
+    tail.append(("Vectors", " "))
+    noun = "braid class" if kind == "braid" else "topological class"
+    return render_template("hgcwa-vectors.html",
+                           title="Generating vectors in the %s %s" % (noun, label),
+                           bread=family_bread(family, tex, tail),
+                           info=info,
+                           downloads=vector_downloads(label),
+                           learnmore=learnmore_list())
+
 
 @higher_genus_w_automorphisms_page.route("/data/<label>")
 def hgcwa_data(label):
-    if label_is_one_family(label):
-        label_col = "label"
+    kind = label_kind(label)
+    if kind == "family":
+        tables, labels, cols, sorts = ["hgcwa_families"], [label], ["label"], [None]
         title = f"Higher genus family - {label}"
-    elif label_is_one_passport(label):
-        label_col = "passport_label"
-        title = f"Higher genus passport - {label}"
+    elif kind == "topological":
+        tables = ["hgcwa_topological", "hgcwa_braid", "hgcwa_vectors"]
+        labels, cols = [label] * 3, ["label", "topological", "topological"]
+        sorts = [None, ["braid_index"], None]
+        title = f"Higher genus topological class - {label}"
+    elif kind == "braid":
+        tables, labels, cols, sorts = ["hgcwa_braid", "hgcwa_vectors"], [label] * 2, ["label", "braid"], [None, None]
+        title = f"Higher genus braid class - {label}"
+    elif kind == "vector":
+        tables, labels, cols, sorts = ["hgcwa_vectors"], [label], ["label"], [None]
+        title = f"Higher genus generating vector - {label}"
     else:
         return abort(404, f"Invalid label {label}")
     bread = get_bread([(label, url_for_label(label)), ("Data", " ")])
-    return datapage(label, "hgcwa_passports", title=title, bread=bread, label_cols=[label_col])
-
-def render_passport(args):
-    info = {}
-    if 'passport_label' in args:
-        label = clean_input(args['passport_label'])
-        dataz = list(db.hgcwa_passports.search({'passport_label': label}))
-        if not dataz:
-            bread = get_bread([("Search Error", url_for('.index'))])
-            flash_error("No refined passport with label %s was found in the database.", label)
-            return redirect(url_for(".index"))
-        data = dataz[0]
-        g = data['genus']
-        g0 = data['g0']
-        GG = ast.literal_eval(data['group'])
-        gn = GG[0]
-        gt = GG[1]
-
-        gp_string = str(gn) + '.' + str(gt)
-        pretty_group = sg_pretty(gp_string)
-        info['cyclic'] = db.gps_small.lookup(gp_string,projection="cyclic")
-
-        if gp_string == pretty_group:
-            spname = False
-        else:
-            spname = True
-
-        numb = len(dataz)
-
-        try:
-            numgenvecs = int(request.args['numgenvecs'])
-            numbraidreps = int(request.args['numbraidreps'])
-        except Exception:
-            numgenvecs = 20
-            numbraidreps = 20
-
-        info['numgenvecs'] = numgenvecs
-        info['numbraidreps'] = numbraidreps
-
-        title = 'One refined passport of genus ' + str(g) + ' with automorphism group $' + pretty_group + '$'
-        smallgroup = "[" + str(gn) + "," + str(gt) + "]"
-
-        prop2 = [
-            ('Label', label),
-            ('Genus', r'\(%d\)' % g),
-            ('Quotient genus', r'\(%d\)' % g0),
-            ('Group', r'\(%s\)' % pretty_group),
-            ('Signature', r'\(%s\)' % sign_display(ast.literal_eval(data['signature']))),
-            ('Generating Vectors', r'\(%d\)' % numb)
-        ]
-        info.update({'genus': data['genus'],
-                    'cc': cc_display(data['con']),
-                    'sign': sign_display(ast.literal_eval(data['signature'])),
-                     'group': pretty_group,
-                     'gpid': smallgroup,
-                     'numb': numb,
-                     'disp_numb': min(numb, numgenvecs),
-                     'g0': data['g0']
-                   })
-
-        if spname:
-            info.update({'specialname': True})
-
-        Ldata = []
-        HypColumn = False
-        Lfriends = []
-        Lbraid = []
-        for i in range(0, min(numgenvecs,numb)):
-            dat = dataz[i]
-            x1 = dat['total_label']
-            if 'full_auto' in dat:
-                x2 = 'no'
-                if dat['full_label'] not in Lfriends:
-                    Lfriends.append(dat['full_label'])
-            else:
-                x2 = 'yes'
-
-            if 'hyperelliptic' in dat:
-                x3 = tfTOyn(dat['hyperelliptic'])
-                HypColumn = True
-            else:
-                x3 = ' '
-
-            x4 = []
-            if dat['g0'] == 0:
-                for perm in dat['gen_vectors']:
-                    cycperm = Permutation(perm).cycle_string()
-                    x4.append(sep.join(split_perm(cycperm)))
-
-            elif dat['g0'] > 0:
-                for perm in dat['gen_vectors']:
-                    cycperm = Permutation(perm).cycle_string()
-                    #if display_perm == '()':
-                    if cycperm == '()':
-                        x4.append('Id(G)')
-                    else:
-                        x4.append(sep.join(split_perm(cycperm)))
-            Ldata.append([x1, x2, x3, x4])
-
-        info.update({'genvects': Ldata, 'HypColumn': HypColumn})
-        info.update({'passport_cc': cc_display(ast.literal_eval(data['con']))})
-
-        #Generate braid representatives
-        if 'braid' in dataz[0]:
-            braid_data = [entry for entry in dataz if entry['braid'] == entry['cc']]
-            for dat in braid_data:
-                x5 = []
-                for perm in dat['gen_vectors']:
-                    x5.append(sep.join(split_perm(Permutation(perm).cycle_string())))
-                Lbraid.append([dat['total_label'], x5])
-
-        braid_length = len(Lbraid)
-
-        #Add braid equivalence into info
-        info.update({'braid': Lbraid,
-                    'braid_numb': braid_length,
-                    'braid_disp_numb': min(braid_length, numbraidreps)})
-
-        if 'eqn' in data:
-            info.update({'eqns': data['eqn']})
-
-        if 'ndim' in data:
-            info.update({'Ndim': data['ndim']})
-
-        other_data = False
-
-        if 'hyperelliptic' in data:
-            info.update({'ishyp': tfTOyn(data['hyperelliptic'])})
-            other_data = True
-
-        if 'hyp_involution' in data:
-            inv = Permutation(data['hyp_involution']).cycle_string()
-            info.update({'hypinv': sep.join(split_perm(inv))})
-
-        if 'cyclic_trigonal' in data:
-            info.update({'iscyctrig': tfTOyn(data['cyclic_trigonal'])})
-            other_data = True
-
-        if 'jacobian_decomp' in data:
-            jcLatex, corrChar = decjac_format(data['jacobian_decomp'])
-            info.update({'corrChar': corrChar, 'jacobian_decomp': jcLatex})
-
-        if 'cinv' in data:
-            cinv = Permutation(data['cinv']).cycle_string()
-            info.update({'cinv': sep.join(split_perm(cinv))})
-
-        info.update({'other_data': other_data})
-
-        if 'full_auto' in data:
-            full_G = ast.literal_eval(data['full_auto'])
-            full_gn = full_G[0]
-            full_gt = full_G[1]
-
-            full_gp_string = str(full_gn) + '.' + str(full_gt)
-            full_pretty_group = sg_pretty(full_gp_string)
-            info.update({'fullauto': full_pretty_group,
-                         'signH': sign_display(ast.literal_eval(data['signH'])),
-                         'higgenlabel': data['full_label']})
-
-        urlstrng, br_g, br_gp, br_sign, _ = split_passport_label(label)
-
-        if Lfriends:
-            friends = [("Full automorphism " + Lf, Lf) for Lf in Lfriends]
-            friends += [("Family containing this refined passport ", urlstrng)]
-        else:
-            friends = [("Family containing this refined passport", urlstrng)]
-
-        bread_sign = label_to_breadcrumbs(br_sign)
-        bread_gp = label_to_breadcrumbs(br_gp)
-
-        bread = get_bread([
-            (br_g, './?genus='+br_g),
-            ('$'+pretty_group+'$', './?genus='+br_g + '&group='+bread_gp),
-            (bread_sign, urlstrng),
-            (data['cc'][0], ' ')])
-
-        if numb == 1 or braid_length == 0:
-            downloads = [
-                ('Code to GAP', url_for(".hgcwa_code_download", label=label, download_type='gap')),
-                ('Code to Magma', url_for(".hgcwa_code_download", label=label, download_type='magma')),
-            ]
-
-        else:
-            downloads = [
-                ('Code to GAP', None),
-                ('\u2003 All vectors', url_for(".hgcwa_code_download", label=label, download_type='gap')),
-                ('\u2003 Up to braid equivalence', url_for(".hgcwa_code_download", label=label, download_type='braid_gap')),
-                ('Code to Magma', None),
-                ('\u2003 All vectors', url_for(".hgcwa_code_download", label=label, download_type='magma')),
-                ('\u2003 Up to braid equivalence', url_for(".hgcwa_code_download", label=label, download_type='braid_magma')),
-            ]
-        downloads.append(('Underlying data', url_for(".hgcwa_data", label=label)))
-
-        return render_template("hgcwa-show-passport.html",
-                               title=title, bread=bread, info=info,
-                               properties=prop2, friends=friends,
-                               learnmore=learnmore_list(), downloads=downloads,
-                               KNOWL_ID="curve.highergenus.aut.%s" % label)
+    return datapage(labels, tables, title=title, bread=bread, label_cols=cols, sorts=sorts)
 
 
-# Generate topological webpage
-@higher_genus_w_automorphisms_page.route("/<fam>/<cc>")
-def topological_action(fam, cc):
-
-    try:
-        br_g, br_gp, br_sign = split_family_label(fam)
-    except AttributeError:
-        flash_error("Invalid family label: %s", fam)
-        return redirect(url_for(".index"))
-
-    try:
-        cc_list = cc_to_list(cc)
-    except IndexError:
-        flash_error("Invalid topological action label: %s", cc)
-        return redirect(url_for(".index"))
-
-    representative = fam + '.' + cc[2:]
-
-    # Get the equivalence class
-    topo_class = list(db.hgcwa_passports.search({'label': fam, 'topological': cc_list}))
-    if not topo_class:
-        flash_error("No orbit in family with label %s and topological action %s was found in the database.", fam, cc)
-        return redirect(url_for(".index"))
-
-    GG = ast.literal_eval(topo_class[0]['group'])
-    gn = GG[0]
-    gt = GG[1]
-
-    gp_string = str(gn) + '.' + str(gt)
-    pretty_group = sg_pretty(gp_string)
-
-    bread_sign = label_to_breadcrumbs(br_sign)
-    bread_gp = label_to_breadcrumbs(br_gp)
-
-    bread = get_bread(
-        [(br_g, '../?genus=' + br_g),
-         ('$%s$' % pretty_group, '../?genus=%s&group=%s' % (br_g, bread_gp)),
-         (bread_sign, '../' + fam),
-         ('Topological Orbit for %s, %s' % (cc_list[0], cc_list[1]), ' ')
-        ]
-    )
-
-    title = 'One Orbit Under Topological Action'
-
-    downloads = [('Download Magma code', url_for(".hgcwa_code_download", label=representative, download_type='rep_magma')),
-                      ('Download Gap code', url_for(".hgcwa_code_download", label=representative, download_type='rep_gap'))]
-
-    Lbraid = {}
-
-    for element in topo_class:
-        if str(element['braid']) in Lbraid:
-            Lbraid[str(element['braid'])].append(
-                (element['passport_label'],
-                 element['total_label'],
-                 ' '))
-            # We include the space so that we don't have duplicate conjugacy
-            # classes displayed
-        else:
-            Lbraid[str(element['braid'])] = [
-                (element['passport_label'],
-                 element['total_label'],
-                 cc_display(ast.literal_eval(element['con'])))]
-
-    # Sort braid ascending
-    key_for_sorted = sorted(ast.literal_eval(key) for key in Lbraid)
-    sorted_braid = [Lbraid[str(key)] for key in key_for_sorted]
-
-    info = {'topological_class': sorted_braid, 'representative': representative, 'braid_num': len(Lbraid)}
-
-    return render_template("hgcwa-topological-action.html", info=info, title=title, bread=bread, downloads=downloads)
-
+# Learn more ################################################################
 
 @higher_genus_w_automorphisms_page.route("/Completeness")
 def completeness_page():
@@ -1091,7 +1236,7 @@ def completeness_page():
     return render_template("single.html", kid='rcs.cande.curve.highergenus.aut',
                            title=t,
                            bread=bread,
-                           learnmore=learnmore_list_remove('Completeness'))
+                           learnmore=learnmore_list())
 
 
 @higher_genus_w_automorphisms_page.route("/Labels")
@@ -1099,7 +1244,7 @@ def labels_page():
     t = 'Labels for higher genus curves with automorphisms'
     bread = get_bread("Labels")
     return render_template("single.html", kid='dq.curve.highergenus.aut.label',
-                           learnmore=learnmore_list_remove('Label'),
+                           learnmore=learnmore_list(),
                            title=t,
                            bread=bread)
 
@@ -1112,7 +1257,7 @@ def reliability_page():
                            kid='rcs.rigor.curve.highergenus.aut',
                            title=t,
                            bread=bread,
-                           learnmore=learnmore_list_remove('Reliability'))
+                           learnmore=learnmore_list())
 
 
 @higher_genus_w_automorphisms_page.route("/Source")
@@ -1125,239 +1270,4 @@ def how_computed_page():
                                  'rcs.cite.curve.highergenus.aut'],
                            title=t,
                            bread=bread,
-                           learnmore=learnmore_list_remove('Source'))
-
-
-_curdir = os.path.dirname(os.path.abspath(__file__))
-code_list = yaml.load(open(os.path.join(_curdir, "code.yaml")), Loader=yaml.FullLoader)
-
-
-same_for_all = ['signature', 'genus']
-other_same_for_all = ['r', 'g0', 'dim', 'sym']
-depends_on_action = ['gen_vectors']
-
-
-Fullname = {'magma': 'Magma', 'gap': 'GAP'}
-Comment = {'magma': '//', 'gap': '#'}
-FileSuffix = {'magma': '.m', 'gap': '.g'}
-
-@higher_genus_w_automorphisms_page.route("/<label>/download/<download_type>")
-def hgcwa_code_download(**args):
-    import time
-    label = args['label']
-
-    # download_type -> (filename prefix, language)
-    DownloadPrefix = {
-        'gap': ('HigherGenusData_', 'gap'),
-        'magma': ('HigherGenusData_', 'magma'),
-        'topo_gap': ('HigherGenusDataTopolRep_', 'gap'),
-        'topo_magma': ('HigherGenusDataTopolRep_', 'magma'),
-        'braid_gap': ('HigherGenusDataBraidRep_', 'gap'),
-        'braid_magma': ('HigherGenusDataBraidRep_', 'magma'),
-        'rep_gap': ('HigherGenusDataTopolClass_', 'gap'),
-        'rep_magma': ('HigherGenusDataTopolClass_', 'magma'),
-    }
-
-    # Choose language and file prefix from the download type
-    download_type = args['download_type']
-    if download_type not in DownloadPrefix:
-        return abort(404, "Unknown download type %s" % download_type)
-    prefix, lang = DownloadPrefix[download_type]
-    all_vectors = (lang == download_type)
-
-    s = Comment[lang]
-    filename = prefix + str(label) + FileSuffix[lang]
-
-    code = s + " " + Fullname[lang] + " code for the lmfdb family of higher genus curves " + str(label) + '\n'
-    code += s + " The results are stored in a list of records called 'data'\n\n"
-    code += code_list['top_matter'][lang] + '\n\n'
-    code += "data:=[];" + '\n\n'
-
-    if label_is_one_vector(label):
-        fam, cc_1, cc_2 = split_vector_label(label)
-        cc_list = [int(cc_1), int(cc_2)]
-        search_data = list(db.hgcwa_passports.search({"label": fam}))
-        data = [entry for entry in search_data if entry.get('topological') == cc_list]
-
-    elif label_is_one_passport(label):
-        search_data = list(db.hgcwa_passports.search({"passport_label": label}))
-        if all_vectors:
-            data = search_data
-        else:
-            data = [entry for entry in search_data if 'braid' in entry and entry['braid'] == entry['cc']]
-
-    elif label_is_one_family(label):
-        search_data = list(db.hgcwa_passports.search({"label": label}))
-        if all_vectors:
-            data = search_data
-        else:
-            data = [entry for entry in search_data if 'topological' in entry and entry['topological'] == entry['cc']]
-
-    else:
-        return abort(404, "Invalid label %s" % label)
-
-    if not data:
-        return abort(404, "No data for label %s" % label)
-
-    code += s + code_list['gp_comment'][lang] + '\n'
-    code += code_list['group'][lang] + str(data[0]['group']) + ';\n'
-    if lang == 'magma':
-        code += code_list['group_construct'][lang] + '\n'
-
-    for k in same_for_all:
-        code += code_list[k][lang] + str(data[0][k]) + ';\n'
-
-    for k in other_same_for_all:
-        code += code_list[k][lang] + '\n'
-
-    code += '\n'
-
-    # create formatting templates to be filled in with each record in data
-    startstr = s + ' Here we add an action to data.\n'
-    stdfmt = ''
-    for k in depends_on_action:
-        stdfmt += code_list[k][lang] + '{' + k + '}' + ';\n'
-
-    if lang == 'magma':
-        stdfmt += code_list['con'][lang] + '{con}' + ';\n'
-
-    stdfmt += code_list['gen_gp'][lang] + '\n'
-    stdfmt += code_list['passport_label'][lang] + '{cc[0]}' + ';\n'
-    stdfmt += code_list['gen_vect_label'][lang] + '{cc[1]}' + ';\n'
-
-    # Add braid and topological tag for each entry.
-    has_refinement_data = all('braid' in entry and 'topological' in entry for entry in data)
-    is_rep_download = download_type in ('rep_gap', 'rep_magma')
-    include_refinement_fields = has_refinement_data and (all_vectors or is_rep_download)
-
-    if include_refinement_fields:
-        braid_value = '{braid}' if is_rep_download else '{braid[1]}'
-        stdfmt += code_list['braid_class'][lang] + braid_value + ';\n'
-        stdfmt += code_list['topological_class'][lang] + '{topological}' + ';\n'
-
-    # extended formatting template for when signH is present
-    signHfmt = stdfmt
-    signHfmt += code_list['full_auto'][lang] + '{full_auto}' + ';\n'
-    signHfmt += code_list['full_sign'][lang] + '{signH}' + ';\n'
-
-    # additional info for hyperelliptic cases
-    hypfmt = code_list['hyp'][lang] + code_list['tr'][lang] + ';\n'
-    hypfmt += code_list['hyp_inv'][lang] + '{hyp_involution}' + code_list['hyp_inv_last'][lang]
-    hypfmt += code_list['cyc'][lang] + code_list['fal'][lang] + ';\n'
-
-    cyctrigfmt = code_list['hyp'][lang] + code_list['fal'][lang] + ';\n'
-    cyctrigfmt += code_list['cyc'][lang] + code_list['tr'][lang] + ';\n'
-    cyctrigfmt += code_list['cyc_auto'][lang] + '{cinv}' + code_list['hyp_inv_last'][lang]
-
-    nhypcycstr = code_list['hyp'][lang] + code_list['fal'][lang] + ';\n'
-    nhypcycstr += code_list['cyc'][lang] + code_list['fal'][lang] + ';\n'
-
-    #Action for all vectors and action for just representatives
-    if include_refinement_fields:
-        signHfmt += code_list['add_to_total_full_rep'][lang] + '\n'
-        hypfmt += code_list['add_to_total_hyp_rep'][lang] + '\n'
-        cyctrigfmt += code_list['add_to_total_cyc_trig_rep'][lang] + '\n'
-        nhypcycstr += code_list['add_to_total_basic_rep'][lang] + '\n'
-    else:
-        signHfmt += code_list['add_to_total_full'][lang] + '\n'
-        hypfmt += code_list['add_to_total_hyp'][lang] + '\n'
-        cyctrigfmt += code_list['add_to_total_cyc_trig'][lang] + '\n'
-        nhypcycstr += code_list['add_to_total_basic'][lang] + '\n'
-
-    start = time.time()
-    lines = [(startstr + (signHfmt if 'signH' in dataz else (stdfmt + (hypfmt if (dataz.get('hyperelliptic') and dataz['hyperelliptic']) else cyctrigfmt if (dataz.get('cyclic_trigonal') and dataz['cyclic_trigonal']) else nhypcycstr)))).format(**dataz) for dataz in data]
-    code += '\n'.join(lines)
-    logger.info("%s seconds for %d chars" % (time.time() - start, len(code)))
-    strIO = BytesIO()
-    strIO.write(code.encode('utf-8'))
-    strIO.seek(0)
-    return send_file(strIO,
-                     download_name=filename,
-                     as_attachment=True)
-
-
-class HGCWASearchArray(SearchArray):
-    noun = "passport"
-    jump_example = "2.12-4.0.2-2-2-3"
-    jump_egspan = "e.g. 2.12-4.0.2-2-2-3 or 3.168-42.0.2-3-7.2"
-    jump_knowl = "curve.highergenus.aut.search_input"
-    jump_prompt = "Label"
-    null_column_explanations = { # No need to display warnings for these
-        'hyperelliptic': False,
-        'cyclic_trigonal': False,
-        'full_label': False,
-        'full_auto': False,
-    }
-    has_diagram = False
-
-    def __init__(self):
-        genus = TextBox(
-            name="genus",
-            label="Genus",
-            knowl="ag.curve.genus",
-            example="3",
-            example_span="4, or a range like 3..5")
-        g0 = TextBox(
-            name="g0",
-            label="Quotient genus",
-            knowl="curve.highergenus.aut.quotientgenus",
-            example="0",
-            example_span="4, or a range like 3..5")
-        signature = TextBox(
-            name="signature",
-            label="Signature",
-            knowl="curve.highergenus.aut.signature",
-            example="[0,2,3,3,6]",
-            example_span="[0,2,3,3,6] or [0;2,3,8]")
-        group_order = TextBox(
-            name="group_order",
-            label="Group order",
-            knowl="group.order",
-            example="2..5",
-            example_span="12, or a range like 10..20, or you may include the variable g for genus like 84(g-1)")
-        group = TextBox(
-            name="group",
-            label="Group identifier",
-            knowl="group.small_group_label",
-            example="[4,2]")
-        dim = TextBox(
-            name="dim",
-            label="Dimension of the family",
-            knowl="curve.highergenus.aut.dimension",
-            example="1",
-            example_span="1, or a range like 0..2")
-        inc_hyper = ExcludeOnlyBox(
-            name="inc_hyper",
-            label="Hyperelliptic curves",
-            knowl="ag.hyperelliptic_curve")
-        inc_cyc_trig = ExcludeOnlyBox(
-            name="inc_cyc_trig",
-            label="Cyclic trigonal curves",
-            knowl="ag.cyclic_trigonal")
-        inc_full = ExcludeOnlyBox(
-            name="inc_full",
-            label="Full automorphism group",
-            knowl="curve.highergenus.aut.full")
-        count = CountBox()
-
-        self.browse_array = [
-            [genus],
-            [g0],
-            [signature],
-            [group_order],
-            [group],
-            [dim],
-            [inc_hyper],
-            [inc_cyc_trig],
-            [inc_full],
-            [count]]
-
-        self.refine_array = [
-            [genus, dim, group_order, inc_hyper, inc_full],
-            [g0, signature, group, inc_cyc_trig]]
-
-    sort_knowl = "curve.highergenus.aut.sort_order"
-    sorts = [("", "genus", ['genus', 'group_order', 'g0', 'dim']),
-             ("g0", "quotient genus", ['g0', 'genus', 'group_order', 'dim']),
-             ("group_order", "group order", ['group_order', 'group', 'genus', 'g0', 'dim']),
-             ("dim", "dimension", ['dim', 'genus', 'group_order', 'g0'])]
+                           learnmore=learnmore_list())
