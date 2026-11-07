@@ -1,0 +1,30 @@
+{% extends "homepage.html" %}
+
+{% block content %}
+
+<p>
+  {{ KNOWL('curve.highergenus.aut.generatingvector', 'Generating vectors') }} are listed up to simultaneous conjugation.
+  The entries are permutations in the LMFDB permutation representation of
+  {{ info.group_knowl | safe }}{% if info.degree %} (of degree ${{ info.degree }}$){% endif %},
+  in cycle notation, with the labels of their {{ KNOWL('group.conjugacy_class', 'conjugacy classes') }}.
+  Products are read from left to right (apply $c_1$ first), and $c_1 c_2 \cdots c_r = 1$.
+</p>
+
+<p>
+  {% if info.number == 1 %}Showing the only generating vector.
+  {% elif info.number == 2 and info.start == 0 and info.count >= 2 %}Showing both generating vectors.
+  {% elif info.number <= info.count and info.start == 0 %}Showing all {{ info.number }} generating vectors.
+  {% else %}Showing {{ info.start + 1 }}-{{ info.upper }} of {{ info.number }} generating vectors.
+  {% endif %}
+  {% if info.prev_url %}<a class="navlink" href="{{ info.prev_url }}">Previous</a>{% endif %}
+  {% if info.next_url %}<a class="navlink" href="{{ info.next_url }}">Next</a>{% endif %}
+</p>
+
+{% with info=info.vector_table %}{% include 'search_results_table.html' %}{% endwith %}
+
+<p>
+  {% if info.prev_url %}<a class="navlink" href="{{ info.prev_url }}">Previous</a>{% endif %}
+  {% if info.next_url %}<a class="navlink" href="{{ info.next_url }}">Next</a>{% endif %}
+</p>
+
+{% endblock %}

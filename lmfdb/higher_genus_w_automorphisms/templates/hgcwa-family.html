@@ -1,0 +1,41 @@
+{% extends 'homepage.html' %}
+
+{% block content %}
+{% set fam = info.family %}
+
+<h2>{{ KNOWL('curve.highergenus.aut.family', 'Family') }} data</h2>
+<table>
+  <tr><td>{{ KNOWL('ag.curve.genus', 'Genus') }}:</td><td>${{ fam.genus }}$</td></tr>
+  <tr><td>{{ KNOWL('group.name', 'Group') }}:</td><td>{{ info.group_knowl | safe }}</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.signature', 'Signature') }}:</td><td>${{ info.signature_display }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.quotientgenus', 'Quotient genus') }}:</td><td>${{ fam.g0 }}$</td></tr>
+  <tr><td>Number of {{ KNOWL('curve.highergenus.aut.branchpoints', 'branch points') }}:</td><td>${{ fam.r }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.dimension', 'Dimension of the family') }}:</td><td>${{ fam.dim }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological classes') }}:</td><td>${{ fam.num_topological }}$</td></tr>
+  <tr><td>Topological classes with $G$ the {{ KNOWL('curve.highergenus.aut.full', 'full automorphism group') }}:</td><td>${{ fam.num_topological_full }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.braid_equivalence', 'Braid classes') }}:</td><td>${{ fam.num_braid }}$</td></tr>
+  <tr><td>{{ KNOWL('curve.highergenus.aut.generatingvector', 'Generating vectors') }}:</td><td>${{ fam.num_vectors }}$</td></tr>
+</table>
+
+<h2>{{ KNOWL('curve.highergenus.aut.topological_equivalence', 'Topological classes') }}</h2>
+<p>
+  Each topological class has its own page, with its braid classes and generating vectors.
+  Hyperelliptic and cyclic trigonal curves are recorded only for the classes in which $G$ is the
+  full automorphism group; for the others, see the full action.
+</p>
+
+{% if info.mixed %}
+<p>
+  Show:
+  {% set all_text = "both" if fam.num_topological == 2 else "all $" ~ fam.num_topological ~ "$" %}
+  {% if info.full_filter == "" %}{{ all_text }}{% else %}<a href="{{ url_for('.by_label', label=fam.label) }}">{{ all_text }}</a>{% endif %}
+  |
+  {% if info.full_filter == "yes" %}full only (${{ fam.num_topological_full }}$){% else %}<a href="{{ url_for('.by_label', label=fam.label, full='yes') }}">full only (${{ fam.num_topological_full }}$)</a>{% endif %}
+  |
+  {% if info.full_filter == "no" %}not full (${{ fam.num_topological - fam.num_topological_full }}$){% else %}<a href="{{ url_for('.by_label', label=fam.label, full='no') }}">not full (${{ fam.num_topological - fam.num_topological_full }}$)</a>{% endif %}
+  &mdash; {{ KNOWL('curve.highergenus.aut.full', 'full') }} means $G$ is the full automorphism group of the generic curve in the class.
+</p>
+{% endif %}
+{% with info=info.top_table %}{% include 'search_results_table.html' %}{% endwith %}
+
+{% endblock %}
